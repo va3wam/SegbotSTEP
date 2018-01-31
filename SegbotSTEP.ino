@@ -534,8 +534,11 @@ void startI2Cbus()
          nDevices++;
          switch(address)                                                     // Check each located device to see what it is
          {
-            case MPU_address:                                                // MPU6050
-               spl("[startI2Cbus] MPU6050");
+            case MPU_address:                                                // Invensense MPU-6050
+               spl("[startI2Cbus] Invensense MPU-6050 IMU on GY-521 or ITG-MPU board");
+               break;
+            case lcdAddr:                                                    // OpenSmart 1602 LCD Display 
+               spl("[startI2Cbus] OpenSmart 1602 LCD Display");
                break;
             default:                                                         // Unknown websocket event
                spl("[startI2Cbus] Unknown device");
