@@ -1,10 +1,17 @@
-/*******************************************************************************************
-  Segbot Short and Squat, Stepper Motor version
-  This code is used to control a Segbot which is a two wheeled self balancing robot. Got a
-  big boost when I found this web site: http://www.brokking.net/yabr_main.html which caused
-  me to change the IMU I was using (switched from Adafruit 9-DOF Absolute Orientation IMU 
-  BNO055 to the GY-521 MPU6050 3-Axis Acceleration Gyroscope 6DOF Module - Blue) as well as 
-  switching from DC brushed motors to Steppers.
+/*************************************************************************************************************************************
+  Segbot Short and Squat, Stepper Motor version (SegbotSTEP)
+  This code is used to control a Segbot which is a two wheeled self balancing robot. The PID calculations and IMU logic are based on 
+  code and information found on this web site: http://www.brokking.net/yabr_main.html which caused me to change the IMU I was using 
+  (switched from Adafruit 9-DOF Absolute Orientation IMU BNO055 to the GY-521 MPU6050 3-Axis Acceleration Gyroscope 6DOF Module - 
+  Blue) as well as switching from DC brushed motors to Steppers. 
+  
+  Networking:
+  The ESP8266 acts as a bi-directional, asyncronous socket server. The socket client will either be used for gathering telemetry 
+  readings from the SegbotSTEP robot or to issue commands to the robot. The websocket and web code is based on the code found online 
+  here: https://gist.github.com/bbx10/667e3d4f5f2c0831d00b. Links to help understand the ESP8266WiFi library can be found here:
+  http://arduino-esp8266.readthedocs.io/en/latest/esp8266wifi/readme.html. This code causes the ESP8266 to act as a web server as 
+  well as a websocket server. The use of name vakue pairs as hashmaps is described here: 
+  https://www.codeproject.com/Tips/1074030/HashMaps-Associative-Arrays-with-the-Arduino-Progr    
 
   Physical circuit design
   - Adafruit Feather HUZZAH development board based on ESP8266 @80MHz, 3.3V 4MB flash
@@ -74,644 +81,539 @@
   - Librabries located at /documents/Arduino/librabries/Adafruit_MotorShield   
   
   History
-  MM-DD-YYYY Description
-  ---------- -------------------------------------------------------------------------------
-  08-02-2017 Code base created.
-  08-04-2017 Added proper motor specs (200 steps per revolution or 1.8 degrees per step). 
-             Also switched from using Step to oneStep librbary routine to allow for control
-             of both motors at the same time by avoiding blocking of I2C bus.
-  09-02-2017 Added average pitch and yaw offset value logic based on YABR code found here:
-             http://www.brokking.net/yabr_main.html.
-  09-03-2017 Added ISR (aka call back routine) to control the stepper motors with more
-             precision. This is a software timer interrupt known on the ESP8266 as the OS
-             interrupt. It is set to call every 20 milliseconds. Note that this is 1000 
-             times SLOWER then the ISR in the YABR code example due to the less powerful
-             ESP8266 chip being used here vs the Uno Mini used in the YABR robot. Need to
-             modify the angle calculations to reflect this when porting code from YABR.
-             Also added loopdelay logic in main loop to reduce range of Loop() execution 
-             down from 16K microseconds to 2 microseconds which will make the robots
-             movement and angle corrections more consistent. 
-  09-03-2017 Added PID calculations from YABR code base. 
-  09-04-2017 Swapped out old motor control code that used a direct onestep() library 
-             call and replaced it with functions that move a set amount of steps 
-             utilizing onestep() internally via the <AccelStepper.h> library. This is done
-             to ensure that no delay() or other interrupt blocking code is being used by the 
-             library routines which would interfere with the os_timer nor the wifi interrupts.            
-
-  To do:
-  - Incorporate YABR code
-    - Battery voltage circuit and code
-    - Figure out balancing code
-    - Add web and/or socket communication for remote control
-    - Experiment with motor speeds and step types 
-********************************************************************************************/
-
-/////////////////////////////////////////////////////////////////////////////////////////////
-// Libraries located relative to root directory
-/////////////////////////////////////////////////////////////////////////////////////////////
-#include <Wire.h>                                       // Needed for I2C
-#include <AccelStepper.h>                               // Needed for motor shield
-#include <Adafruit_MotorShield.h>                       // Needed for motor shield
-#include "utility/Adafruit_MS_PWMServoDriver.h"         // Needed for motor shield
-#include "user_interface.h"                             // Needed for ISR. Note it is reported
-                                                        // that microsecond ISRs break Wifi so
-                                                        // it may not be possible to have Wifi
-                                                        // on this robot using the ESP8266
-
-/////////////////////////////////////////////////////////////////////////////////////////////
-// Define constants to help document key values of devices and formulas
-/////////////////////////////////////////////////////////////////////////////////////////////
-#define MotorShield_I2C_Address 0x60 // I2C address for motorShield. Soldering on board 
-                                     // required to change. Dec 96 (hex 0x60) is the default 
-                                     // address that we are using.
-#define MotorShieldPWMFrequency 1600 // The default (and max) PWM frequency of 1.6KHz. You 
-                                     // can specify a lower value then 1600 but not a higher 
-                                     // value because this is the upper limit of the PCA9865 
-                                     // PWM chip used on the Adafruit Featherwing motor shield. 
-#define MotorStepsPerRevolution 200  // 200 steps per revolution (1.8 degrees per step)
-#define MotorSpeed 120               // Define the RPMs of the motor (unsigned INT). Max speed 
-                                     // is 255 I believe.
-#define Motor1 1                     // Refer to the right motor as 1 
-#define Motor2 2                     // Refer to the left motor as 2
-#define SerialSpeed 9600             // Use slower speed to help with reliability of buses 
-#define gyro_address 0x68            // MPU-6050 I2C address. Note that AD0 pin on the
-                                     // board cannot be left flaoting and must be connected
-                                     // to the Arduino ground for address 0x68 or be connected
-                                     // to VDC for address 0x69.
-#define MPU6050_WHO_AM_I 0x75        // Read only register on IMU with info about the device
-#define OnboardLEDPin 13             // Pin connected to Huzzah board's built-in LED
-#define LoopDelay 20000              // This is the target time in milliseconds that each
-                                     // iteration of Loop() should take. YABR used 4000 but
-                                     // testing shows that the ESP8266 cannot handle that
-                                     // speed but it can handle 20000. All angle calcuations
-                                     // will need to take this into account when porting from
-                                     // the YABR code base. 
-#define scopePinISR  2               // Pin used to attach scope to in order to understand ISR timing                                     
-#define scopePinLOOP 16               // Pin used to attach scope to in order to understand ISR timing                                     
-
-/////////////////////////////////////////////////////////////////////////////////////////////
-// Define global variables
-/////////////////////////////////////////////////////////////////////////////////////////////
-int acc_calibration_value = 1000;    // Set this variable to the accelerometer calibration 
-                                     // value 
-int gyro_pitch_data_raw;             // Collect raw PITCH data from MPU
-int gyro_yaw_data_raw;               // Collect raw YAW data from MPU
-int accelerometer_data_raw;          // Collect raw ACCELEROMETER data from MPU
-long gyro_yaw_calibration_value;     // YAW calibration value
-long gyro_pitch_calibration_value;   // PITCH calibration value
-bool tickOccured;                    // Track if ISR has fired
-unsigned long loop_timer;            // Used to ensure that each loop() takes the same amount 
-                                     // of time. THe YABR robot uses 4 Milliseconds but tests
-                                     // indicate that using the ESP8266 Wifi unit will only 
-                                     // handle 20 Milliseconds. This must be accounted for 
-                                     // when porting the andle calulations over from YABR.
-float pid_p_gain = 15;               //Gain setting for the P-controller (15)
-float pid_i_gain = 1.5;              //Gain setting for the I-controller (1.5)
-float pid_d_gain = 30;               //Gain setting for the D-controller (30)
-float turning_speed = 30;            //Turning speed (20)
-float max_target_speed = 150;        //Max target speed (100)
-
-byte lMotorDirection = 0;            // track direction that the left motor should turn (0=forward, 1=backward)
-byte rMotorDirection = 0;            // track direction that the right motor should turn (0=forward, 1=backward)
-
-// Do not yet know what these varliables do
-int throttle_left_motor;
-int throttle_counter_left_motor;
-int throttle_left_motor_memory;
-int left_motor;
-
-int right_motor;
-int throttle_right_motor;
-int throttle_counter_right_motor;
-int throttle_right_motor_memory;
-
-float angle_gyro, angle_acc, angle, self_balance_pid_setpoint;
-float pid_error_temp, pid_i_mem, pid_setpoint, gyro_input, pid_output, pid_last_d_error;
-float pid_output_left, pid_output_right;
-byte start;
-byte low_bat;
-                                     
-/////////////////////////////////////////////////////////////////////////////////////////////
-// Create ISR object
-/////////////////////////////////////////////////////////////////////////////////////////////
-os_timer_t myTimer;
-                                                                           
-/////////////////////////////////////////////////////////////////////////////////////////////
-// Create the motor shield object with the default I2C address (0x60). You can change the 
-// default address by shorting pins labeled A0 through A4 on the board to chnage the 
-// boards address. Shorting each pin adds 1 to the default address. If you do this then you 
-// must specify the I2C address of the board when you instantiate it like this example:
-// Adafruit_MotorShield AFMS = Adafruit_MotorShield(0x61);
-/////////////////////////////////////////////////////////////////////////////////////////////
-Adafruit_MotorShield AFMS = Adafruit_MotorShield(MotorShield_I2C_Address); 
- 
-/////////////////////////////////////////////////////////////////////////////////////////////
-// Create motor objects for both stepper motors used on this robot. Motors have 200 steps per 
-// revolution (meaning each step moves 1.8 degrees). Note that the motor numbers are labeled 
-// on the MotorShield silkscreen.
-/////////////////////////////////////////////////////////////////////////////////////////////
-Adafruit_StepperMotor *stepperR = AFMS.getStepper(MotorStepsPerRevolution, Motor1);
-Adafruit_StepperMotor *stepperL = AFMS.getStepper(MotorStepsPerRevolution, Motor2);
-
-/////////////////////////////////////////////////////////////////////////////////////////////
-// you can change the second argument to SINGLE, DOUBLE or INTERLEAVE or MICROSTEP!
-// wrappers for the first motor!
-/////////////////////////////////////////////////////////////////////////////////////////////
-void rightForward() 
-{  
-
-   stepperR->onestep(FORWARD, SINGLE);
-
-} //rightForward
-
-/////////////////////////////////////////////////////////////////////////////////////////////
-// you can change the second argument to SINGLE, DOUBLE or INTERLEAVE or MICROSTEP!
-// wrappers for the first motor!
-/////////////////////////////////////////////////////////////////////////////////////////////
-void rightBackward() 
-{  
-
-   stepperR->onestep(BACKWARD, SINGLE);
-
-} //rightBackard
-
-/////////////////////////////////////////////////////////////////////////////////////////////
-// you can change the second argument to SINGLE, DOUBLE or INTERLEAVE or MICROSTEP!
-// wrappers for the second motor!
-/////////////////////////////////////////////////////////////////////////////////////////////
-void leftForward() 
-{  
-
-   stepperL->onestep(FORWARD, SINGLE);
-
-} //leftForward
-
-/////////////////////////////////////////////////////////////////////////////////////////////
-// you can change the second argument to SINGLE, DOUBLE or INTERLEAVE or MICROSTEP!
-// wrappers for the second motor!
-/////////////////////////////////////////////////////////////////////////////////////////////
-void leftBackward() 
-{  
-
-   stepperL->onestep(BACKWARD, SINGLE);
-
-} //leftBackward
-
-/////////////////////////////////////////////////////////////////////////////////////////////
-// Now we'll wrap the 2 steppers in an AccelStepper object
-/////////////////////////////////////////////////////////////////////////////////////////////
-AccelStepper rightMotor(rightForward, rightBackward);
-AccelStepper leftMotor(leftForward, leftBackward);
-
-/////////////////////////////////////////////////////////////////////////////////////////////
-// Define ISR (timerCallback)
-/////////////////////////////////////////////////////////////////////////////////////////////
-void timerCallback(void *pArg) 
-{
-
-   digitalWrite(scopePinISR,HIGH);
-//   leftForward(); // just put this here to see if we can call this from within the ISR safely
-//   rightForward(); // just put this here to see if we can call this from within the ISR safely
-  
-   
-
-   //Left motor pulse calculations
-   throttle_counter_left_motor ++;                                           //Increase the throttle_counter_left_motor variable by 1 every time this routine is executed
-   if(throttle_counter_left_motor > throttle_left_motor_memory)              //If the number of loops is larger then the throttle_left_motor_memory variable
-   {
-    throttle_counter_left_motor = 0;                                        //Reset the throttle_counter_left_motor variable
-    throttle_left_motor_memory = throttle_left_motor;                       //Load the next throttle_left_motor variable
-    if(throttle_left_motor_memory < 0)                                      //If the throttle_left_motor_memory is negative
-    {
-//      PORTD &= 0b11110111;                                                  //Set output 3 low to reverse the direction of the stepper controller
-       lMotorDirection = 1;                                                   //Set left motor left motor direction to backward
-      throttle_left_motor_memory *= -1;                                     //Invert the throttle_left_motor_memory variable
-    } //if
-//    else PORTD |= 0b00001000;                                               //Set output 3 high for a forward direction of the stepper motor
-      else lMotorDirection = 0;                                               //Set left motor left motor direction to forward
-
-  } //if
-//  else if(throttle_counter_left_motor == 1)PORTD |= 0b00000100;             //Set output 2 high to create a pulse for the stepper controller
-//  else if(throttle_counter_left_motor == 2)PORTD &= 0b11111011;             //Set output 2 low because the pulse only has to last for 20us 
-  else if(throttle_counter_left_motor == 1)
-  {
-//    PORTD |= 0b00000100;             //Set output 2 high to create a pulse for the stepper controller
-     if(lMotorDirection = 0)
-     {
-        leftForward(); 
-     } //if
-     else
-     { 
-        leftBackward(); 
-     } //else
-  } //elseif
-
-  
+  Version MM-DD-YYYY Description
+*/   
+  String my_ver="1.0";
 /*
-  //right motor pulse calculations
-  throttle_counter_right_motor ++;                                          //Increase the throttle_counter_right_motor variable by 1 every time the routine is executed
-  if(throttle_counter_right_motor > throttle_right_motor_memory){           //If the number of loops is larger then the throttle_right_motor_memory variable
-    throttle_counter_right_motor = 0;                                       //Reset the throttle_counter_right_motor variable
-    throttle_right_motor_memory = throttle_right_motor;                     //Load the next throttle_right_motor variable
-    if(throttle_right_motor_memory < 0){                                    //If the throttle_right_motor_memory is negative
-      PORTD |= 0b00100000;                                                  //Set output 5 low to reverse the direction of the stepper controller
-      throttle_right_motor_memory *= -1;                                    //Invert the throttle_right_motor_memory variable
+  ------- ---------- -----------------------------------------------------------------------------------------------------------------
+  1.0     01-30-2018 Code base created
+ *************************************************************************************************************************************/
+#include <ESP8266WiFi.h>                                                     // Connect ESP8266 to AP
+#include <ESP8266WiFiMulti.h>                                                // Find best available AP to connect to
+#include <WebSocketsServer.h>                                                // https://github.com/Links2004/arduinoWebSockets
+#include <Hash.h>                                                            // Allow us to crete associative arrays
+#include <ESP8266WebServer.h>                                                // Turn ESP8266 into web server
+#include <ESP8266mDNS.h>                                                     // Allow ESP8266 to map services it offers to client 
+#include <Wire.h>                                                            // Needed for I2C communication
+
+/*************************************************************************************************************************************
+ Define network objects and services
+ *************************************************************************************************************************************/
+static const char ssid0[] = "MN_BELL418";                                    // The name of a Wi-Fi network AP to connect to
+static const char ssid1[] = "MN_WORKSHOP_2.4GHz";                            // The name of a Wi-Fi network AP to connect to
+static const char ssid2[] = "MN_DS_OFFICE_2.4GHz";                           // The name of a Wi-Fi network AP to connect to
+static const char ssid3[] = "MN_OUTSIDE";                                    // The name of a Wi-Fi network AP to connect to
+static const char password[] = "5194741299";                                 // The password for all of the Wi-Fi network APs
+static const char *wsEvent[] = { "WStype_DISCONNECTED", "WStype_CONNECTED", "WStype_TEXT", "WStype_BIN"};
+MDNSResponder mdns;                                                          // DNS Service Discovery object used for client handshaking
+static void writeLED(bool);                                                  // Not sure why this line is needed, function defined below
+ESP8266WiFiMulti WiFiMulti;                                                  // Allows us to connect to one of a number of APs.
+ESP8266WebServer server(80);                                                 // Define web server object listening on port 80
+WebSocketsServer webSocket = WebSocketsServer(81);                           // Define websocket object listening on port 81  
+
+/*************************************************************************************************************************************
+ Doug's shortcuts
+ *************************************************************************************************************************************/
+#define LINE(name,val) Serial.print(name); Serial.print("\t"); Serial.println(val); //Debug macro, prints current code line
+#define sp Serial.print                                                      // Shortform print no carrige return
+#define spl Serial.println                                                   // Shortform print with carrige return
+#define spc Serial.print(", ")                                               // Shortform print comma and space
+#define spf Serial.printf                                                    // Shortform formatted printing with no line return
+
+/*************************************************************************************************************************************
+ Define on-board LED definitions. GPIO0 is where the onboard LED is located for the Adafruit ESP8266 HUZZAH board. Other board's LED 
+ might be on GPIO13.
+ *************************************************************************************************************************************/
+const int LEDPIN = 0;                                                        // GPIO pin the the onboard LED is connected to
+bool LEDStatus;                                                              // Current LED status
+const char LEDON[] = "ledon";                                                // Turn onboard LED ON
+const char LEDOFF[] = "ledoff";                                              // Turn onboard LED OFF
+
+/*************************************************************************************************************************************
+ I2C device address definitions
+ *************************************************************************************************************************************/
+#define MPU6050_WHO_AM_I 0x75                                                // Read only register on IMU with info about the device
+#define MPU_address 0x68                                                     // MPU-6050 I2C address. Note that AD0 pin on the
+                                                                             // board cannot be left flaoting and must be connected
+                                                                             // to the Arduino ground for address 0x68 or be connected
+                                                                             // to VDC for address 0x69.
+
+/*************************************************************************************************************************************
+ Define MPU6050 related variables
+ *************************************************************************************************************************************/ 
+int acc_calibration_value = 1000;                                            // Set this variable to the accelerometer calibration 
+                                                                             // value output at start-up of this script
+int gyro_pitch_data_raw;                                                     // Collect raw PITCH data from MPU
+int gyro_yaw_data_raw;                                                       // Collect raw YAW data from MPU
+int accelerometer_data_raw;                                                  // Collect raw ACCELEROMETER data from MPU
+int receive_counter;                                                         // Used to get an average off set value for the pitch
+int acc_x;                                                                   // Read raw low and high byte to the MPU acc_x register
+int acc_y;                                                                   // Read raw low and high byte to the MPU acc_y register
+int acc_z;                                                                   // Read raw low and high byte to the MPU acc_z register
+int gyro_x;                                                                  // Read raw low and high byte to the MPU gyro_x register
+int gyro_y;                                                                  // Read raw low and high byte to the MPU gyro_y register
+int gyro_z;                                                                  // Read raw low and high byte to the MPU gyro_z register
+int temperature;                                                             // Read raw low and high byte to the MPU temperature register
+int tmp;                                                                     // Used to do different calculations to extend the sign bit 
+                                                                             // of raw data 
+long gyro_yaw_calibration_value;                                             // YAW calibration value
+long gyro_pitch_calibration_value;                                           // PITCH calibration value
+bool tickOccured;                                                            // Track if ISR has fired
+float pid_p_gain = 15;                                                       // Gain setting for the P-controller (15)
+float pid_i_gain = 1.5;                                                      // Gain setting for the I-controller (1.5)
+float pid_d_gain = 30;                                                       // Gain setting for the D-controller (30)
+float turning_speed = 30;                                                    // Turning speed (20)
+float max_target_speed = 150;                                                // Max target speed (100)
+float angle_gyro, angle_acc, angle, self_balance_pid_setpoint;               // Gyroscope angle data
+float pid_error_temp, pid_i_mem, pid_setpoint, gyro_input, pid_output;       // PID related
+float pid_output_left, pid_output_right,pid_last_d_error;                    // PID related
+
+/*************************************************************************************************************************************
+ Define power management related variables
+ *************************************************************************************************************************************/ 
+byte low_bat;                                                                // Flag when battery power level gets too low
+
+/*************************************************************************************************************************************
+ Define main loop workflow related variables
+ *************************************************************************************************************************************/ 
+#define LoopDelay 100000                                                     // This is the target time in milliseconds that each
+                                                                             // iteration of Loop() should take. YABR used 4000 but
+                                                                             // testing shows that the ESP8266 cannot handle that
+                                                                             // speed but it can handle 20000. All angle calcuations
+                                                                             // will need to take this into account when porting from
+                                                                             // the YABR code base. 
+byte start;                                                                  // Flag initial run of main loop
+unsigned long loop_timer;                                                    // Used to ensure that each loop() takes the same amount 
+                                                                             // of time. The YABR robot uses 4 Milliseconds but tests
+                                                                             // indicate that using the ESP8266 Wifi unit will only 
+                                                                             // handle 20 Milliseconds. This must be accounted for 
+                                                                             // when porting the andle calulations over from YABR.
+
+/*************************************************************************************************************************************
+ Declare INDEX_HTML as a FLASH memory string containing a web page. Note that details on programming ESP8266 PROGMEM are found here:
+ http://arduino-esp8266.readthedocs.io/en/latest/PROGMEM.html. Details on how to write a Websocket Javascript client can be found
+ here: https://www.tutorialspoint.com/websockets/websockets_send_receive_messages.htm
+ *************************************************************************************************************************************/
+static const char PROGMEM INDEX_HTML[] = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+<meta name = "viewport" content = "width = device-width, initial-scale = 1.0, maximum-scale = 1.0, user-scalable=0">
+<title>SegbotSTEP Web Based Control Center</title>
+<style>
+"body { background-color: #808080; font-family: Arial, Helvetica, Sans-Serif; Color: #000000; }"
+</style>
+<script>
+var websock;
+function start() {
+  websock = new WebSocket('ws://' + window.location.hostname + ':81/');
+  websock.onopen = function(evt) { console.log('websock open'); };
+  websock.onclose = function(evt) { console.log('websock close'); };
+  websock.onerror = function(evt) { console.log(evt); };
+  websock.onmessage = function(evt) {
+    console.log(evt);
+    var e = document.getElementById('ledstatus');
+    if (evt.data === 'ledon') {
+      e.style.color = 'red';
     }
-    else PORTD &= 0b11011111;                                               //Set output 5 high for a forward direction of the stepper motor
-  }
-  else if(throttle_counter_right_motor == 1)PORTD |= 0b00010000;            //Set output 4 high to create a pulse for the stepper controller
-  else if(throttle_counter_right_motor == 2)PORTD &= 0b11101111;            //Set output 4 low because the pulse only has to last for 20us
-*/
+    else if (evt.data === 'ledoff') {
+      e.style.color = 'black';
+    }
+    else {
+      console.log('unknown event');
+    }
+  };
+}
+function buttonclick(e) {
+  websock.send(e.id);
+}
+</script>
+</head>
+<body onload="javascript:start();">
+<h1>ESP8266 WebSocket Demo</h1>
+<div id="ledstatus"><b>LED</b></div>
+<button id="ledon"  type="button" onclick="buttonclick(this);">On</button> 
+<button id="ledoff" type="button" onclick="buttonclick(this);">Off</button>
+</body>
+</html>
+)rawliteral";
 
-   digitalWrite(scopePinISR,LOW);
+/*************************************************************************************************************************************
+ This function dumps a bunch of useful info to the terminal. This code is based on an exmaple we found at this URL:
+ https://stackoverflow.com/questions/14143517/find-the-name-of-an-arduino-sketch-programmatically                                   
+ *************************************************************************************************************************************/
+void display_Running_Sketch()
+{                                 
+  
+   sp("[display_Running_Sketch] Sketch Name: ");spl(__FILE__);
+   sp("[display_Running_Sketch] Version: "); spl(my_ver);
+   sp("[display_Running_Sketch] Compiled on: ");sp(__DATE__);sp(" at ");spl(__TIME__);
+   LINE("[display_Running_Sketch] Current line of code test: ", __LINE__);
 
-} // timerCallback()
+} //display_Running_Sketch()
 
-/////////////////////////////////////////////////////////////////////////////////////////////
-// Create ISR based on the ESP8266 timer and definition above
-/////////////////////////////////////////////////////////////////////////////////////////////
-void create_ISR(void) 
-{
- /*------------------------------------------------------------------------------------------ 
-    os_timer_setfn - Define a function to be called when the timer fires
-    void os_timer_setfn(
-      os_timer_t *pTimer,
-      os_timer_func_t *pFunction,
-      void *pArg)
-
-    Define the callback function that will be called when the timer reaches zero. The 
-    pTimer parameters is a pointer to the timer control structure.
-    The pFunction parameters is a pointer to the callback function.
-    The pArg parameter is a value that will be passed into the called back function. The 
-    callback function should have the signature:
-    void (*functionName)(void *pArg)
-    The pArg parameter is the value registered with the callback function.
-   -----------------------------------------------------------------------------------------*/
-   os_timer_setfn(&myTimer, timerCallback, NULL);
-
- /*------------------------------------------------------------------------------------------ 
-   os_timer_arm -  Enable a millisecond granularity timer.
-   void os_timer_arm(
-      os_timer_t *pTimer,
-      uint32_t milliseconds,
-      bool repeat)
-   Arm a timer such that is starts ticking and fires when the clock reaches zero.
-   The pTimer parameter is a pointed to a timer control structure.
-   The milliseconds parameter is the duration of the timer measured in milliseconds. The 
-   repeat parameter is whether or not the timer will restart once it has reached zero.
-   -----------------------------------------------------------------------------------------*/
-   os_timer_arm(&myTimer, 20, true);
-
-} //create_ISR
-
-/////////////////////////////////////////////////////////////////////////////////////////////
-// Boot up routine for robot
-/////////////////////////////////////////////////////////////////////////////////////////////
-void setup() 
+/*************************************************************************************************************************************
+ This function handles Websocket events. Websockets are persitent bi-directional, asyncronous connections between a client and server  
+ *************************************************************************************************************************************/
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length)
 {
 
-   // Initialize I2C bus
-   Wire.begin();
-  
-   // Initialize console terminal
-   Serial.begin(SerialSpeed);
-   delay(100);  
+   spf("[webSocketEvent] Event detected: ");                                 // Show event details in terminal   
+   spf("num = %d, type = %d (", num, type);                                  // Show event details in terminal
+   sp(wsEvent[type-1]);spl(")");                                             // Show event details in terminal
+   switch(type)                                                              // Handle each event by type
+   {
+      case WStype_DISCONNECTED:                                              // Client disconnect event
+         spf("[webSocketEvent] [%u] Disconnected!\r\n", num);
+         break;
+      case WStype_CONNECTED:                                                 // Client connect event
+      {
+         IPAddress ip = webSocket.remoteIP(num);
+         spf("[webSocketEvent] [%u] Connected from %d.%d.%d.%d url: %s\r\n", num, ip[0], ip[1], ip[2], ip[3], payload);
+         // Send the current LED status
+         if (LEDStatus)                                                      // If client sent command to change the LED status 
+         {
+            webSocket.sendTXT(num, LEDON, strlen(LEDON));                    // Send "ledon" string to client
+         } //if
+         else                                                                // If client wants to turn LED off
+         {
+            webSocket.sendTXT(num, LEDOFF, strlen(LEDOFF));                  // Send "ledoff" string to client 
+         } //else
+       } //case
+         break;                                                   
+      case WStype_TEXT:                                                      // Client sent text event
+         spf("[webSocketEvent] Client NUM: [%u], sent TEXT: %s\r\n", num, payload);
+         processClientText(num, type, payload, length);
+         break;
+      case WStype_BIN:                                                       // Client sent binary data event
+         spf("[webSocketEvent] [%u] get binary length: %u\r\n", num, length);
+         hexdump(payload, length);                                           // Dump ESP8266 memory in hex to the console
+         webSocket.sendBIN(num, payload, length);                            // echo data back to browser
+         break;
+      default:                                                               // Unknown websocket event
+         spf("[webSocketEvent] Invalid WStype [%d]\r\n", type);
+         break;
+   } //switch()
 
-   // Allow onboard LED to be controlled by this program
-   pinMode(OnboardLEDPin, OUTPUT);
-           
-   Serial.println("*** Ignore noise in terminal prior to this point...");
-   Serial.println("(setup): Initialize SegbotSTEP hardware...");
+} //webSocketEvent()
 
-   //Set up ISR
-   pinMode(scopePinISR,OUTPUT);  // Used to test ISR timing with a scope   
-   pinMode(scopePinLOOP,OUTPUT); // Used to test ISR timing with a scope   
-   tickOccured = false;
-   Serial.println("(setup): Create ISR callback routine to control stepper motors...");
-   create_ISR();
-
-   // Initialize MPU6050 IMU
-   Serial.println("(setup): Initialize IMU");
-   initializeIMU();
-
-   // Initialize Adafruit MotorShield
-   Serial.println("(setup): Initialize MotorShield");
-   initializeMotorShield();
-
-   Serial.println("(setup): Initialization of the SegbotSTEP hardware complete");
-
-   //Set the loop_timer variable at the next end loop time
-   loop_timer = micros() + LoopDelay;
-  
-} //setup
-
-/////////////////////////////////////////////////////////////////////////////////////////////
-// This is the main program logic. 
-/////////////////////////////////////////////////////////////////////////////////////////////
-void loop() 
+/*************************************************************************************************************************************
+ This function handles the web server service for valid HTTP GET and POST requests for the root (home) page. The rely simply sends 
+ the web page defined in the EEPROM (non-volitile memory of the ESP8266 chip), pointed to by INDEX_HTML[] 
+ *************************************************************************************************************************************/
+void handleRoot()
 {
-    
-   digitalWrite(scopePinLOOP,!digitalRead(scopePinLOOP));
+
+   server.send_P(200, "text/html", INDEX_HTML);                              // Send the HTML page defined in INDEX_HTML
+   spl("[handleRoot] Sent HTML page to client");                              
    
-   //-------------------------------------------------------------------------------------------------------------------------------------
-   // Angle calculations
-   //-------------------------------------------------------------------------------------------------------------------------------------
-   Wire.beginTransmission(gyro_address);                                     // Start communication with the gyro
-   Wire.write(0x3F);                                                         // Start reading at register 3F
-   Wire.endTransmission();                                                   // End the transmission
-   Wire.requestFrom(gyro_address, 2);                                        // Request 2 bytes from the gyro
-   accelerometer_data_raw = Wire.read()<<8|Wire.read();                      // Combine the two bytes to make one integer
-   accelerometer_data_raw += acc_calibration_value;                          // Add the accelerometer calibration value
-   if(accelerometer_data_raw > 8200)accelerometer_data_raw = 8200;           // Prevent division by zero by limiting the acc data to +/-8200;
-   if(accelerometer_data_raw < -8200)accelerometer_data_raw = -8200;         // Prevent division by zero by limiting the acc data to +/-8200;
+} //handleRoot()
 
-   angle_acc = asin((float)accelerometer_data_raw/8200.0)* 57.296;           // Calculate the current angle according to the accelerometer
+/*************************************************************************************************************************************
+ This function handles the web server service for invalid HTTP GET and POST requests. If the requested file or page doesn't exist, 
+ return a 404 not found error to the client 
+ *************************************************************************************************************************************/
+void handleNotFound()
+{
 
-   if(start == 0 && angle_acc > -0.5&& angle_acc < 0.5)                      // If the accelerometer angle is almost 0
+   String message = "File Not Found\n\n";                                    // Build string with 404 file not found message
+          message += "URI: ";
+          message += server.uri();
+          message += "\nMethod: ";
+          message += (server.method() == HTTP_GET)?"GET":"POST";
+          message += "\nArguments: ";
+          message += server.args();
+          message += "\n";
+   for (uint8_t i=0; i<server.args(); i++)                                   // Append actual HTTP error elements to message
    {
-    
-     angle_gyro = angle_acc;                                                 // Load the accelerometer angle in the angle_gyro variable
-     start = 1;                                                              // Set the start variable to start the PID controller
-  
+      message += " " + server.argName(i) + ": " + server.arg(i) + "\n"; 
+   } //for
+   server.send(404, "text/plain", message);                                  // Send 404 error message back to client
+   spl("[handleNotFound] Sent 404 error to client");                              
+
+} //handleNotFound()
+
+/*************************************************************************************************************************************
+ This function controls the onboard Adafruit ESP8266 Huzzah LED. Note inverted logic for Adafruit HUZZAH board
+ *************************************************************************************************************************************/
+void writeLED(bool LEDon)
+{
+
+   LEDStatus = LEDon;                                                        // Track status of LED
+   if (LEDon)                                                                // If request is to turn LED on
+   {
+      digitalWrite(LEDPIN, 0);                                               // Set LED GPIO low, which turn the LED on
+      spl("[writeLED] Set LED GPIO LOW (turn LED on)");
    } //if
-  
-   Wire.beginTransmission(gyro_address);                                     // Start communication with the gyro
-   Wire.write(0x43);                                                         // Start reading at register 43
-   Wire.endTransmission();                                                   // End the transmission
-   Wire.requestFrom(gyro_address, 4);                                        // Request 4 bytes from the gyro
-   gyro_yaw_data_raw = Wire.read()<<8|Wire.read();                           // Combine the two bytes to make one integer
-   gyro_pitch_data_raw = Wire.read()<<8|Wire.read();                         // Combine the two bytes to make one integer
-  
-   gyro_pitch_data_raw -= gyro_pitch_calibration_value;                      // Add the gyro calibration value
-   angle_gyro += gyro_pitch_data_raw * 0.000031;                             // Calculate the traveled during this loop angle and add this to the angle_gyro variable
-  
-   //-------------------------------------------------------------------------------------------------------------------------------------
-   // MPU-6050 offset compensation
-   //-------------------------------------------------------------------------------------------------------------------------------------
-   // Not every gyro is mounted 100% level with the axis of the robot. This can be cause by misalignments during manufacturing of the breakout board. 
-   // As a result the robot will not rotate at the exact same spot and start to make larger and larger circles.
-   // To compensate for this behavior a VERY SMALL angle compensation is needed when the robot is rotating.
-   // Try 0.0000003 or -0.0000003 first to see if there is any improvement.
-
-   gyro_yaw_data_raw -= gyro_yaw_calibration_value;                          // Add the gyro calibration value
-   // Uncomment the following line to make the compensation active
-   //angle_gyro -= gyro_yaw_data_raw * 0.0000003;                            // Compensate the gyro offset when the robot is rotating
-
-   angle_gyro = angle_gyro * 0.9996 + angle_acc * 0.0004;                    // Correct the drift of the gyro angle with the accelerometer angle
-
-   //-------------------------------------------------------------------------------------------------------------------------------------
-   // PID controller calculations
-   //-------------------------------------------------------------------------------------------------------------------------------------
-   // The balancing robot is angle driven. First the difference between the desired angel (setpoint) and actual angle (process value)
-   // is calculated. The self_balance_pid_setpoint variable is automatically changed to make sure that the robot stays balanced all the time.
-   // The (pid_setpoint - pid_output * 0.015) part functions as a brake function.
-   pid_error_temp = angle_gyro - self_balance_pid_setpoint - pid_setpoint;
-   if(pid_output > 10 || pid_output < -10)pid_error_temp += pid_output * 0.015;
-
-   pid_i_mem += pid_i_gain * pid_error_temp;                                 // Calculate the I-controller value and add it to the pid_i_mem variable
-   if(pid_i_mem > 400)pid_i_mem = 400;                                       // Limit the I-controller to the maximum controller output
-   else if(pid_i_mem < -400)pid_i_mem = -400;
-  
-   //Calculate the PID output value
-   pid_output = pid_p_gain * pid_error_temp + pid_i_mem + pid_d_gain * (pid_error_temp - pid_last_d_error);
-   if(pid_output > 400)pid_output = 400;                                     // Limit the PI-controller to the maximum controller output
-   else if(pid_output < -400)pid_output = -400;
-
-   pid_last_d_error = pid_error_temp;                                        // Store the error for the next loop
-
-   if(pid_output < 5 && pid_output > -5)pid_output = 0;                      // Create a dead-band to stop the motors when the robot is balanced
-
-   if(angle_gyro > 30 || angle_gyro < -30 || start == 0 || low_bat == 1)     // If the robot tips over or the start variable is zero or the battery is empty
+   else 
    {
-  
-      pid_output = 0;                                                        // Set the PID controller output to 0 so the motors stop moving
-      pid_i_mem = 0;                                                         // Reset the I-controller memory
-      start = 0;                                                             // Set the start variable to 0
-      self_balance_pid_setpoint = 0;                                         // Reset the self_balance_pid_setpoint variable
-  
-    } //if
+      digitalWrite(LEDPIN, 1);                                               // Set LED GPIO high, which turn the LED off
+      spl("[writeLED] Set LED GPIO HIGH (turn LED off)");
+   } //else
 
-   //-------------------------------------------------------------------------------------------------------------------------------------
-   // Current motor control logic, to be replaced by converted code from YABR
-   // Here are notes from the librabry notes that help remind me why I want to use
-   // the oneStep() function and not the (step) function used in the example code from Adafruit:
-   // 
-   // The oneStep(DIRECTION, STYLE) function is a low-level internal function called by step(). 
-   // But it can be useful to call on its own to implement more advanced functions such as 
-   // acceleration or coordinating simultaneous movement of multiple stepper motors. The 
-   // direction and style parameters are the same as for step(), but onestep() steps exactly 
-   // once. Note: Calling step() with a step count of 1 is not the same as calling onestep(). 
-   // The step function has a delay based on the speed set in setSpeed(). onestep() has no delay. 
-   //
-   // DIRECTION = FORWARD or BACKWARD
-   // STYLE = SINGLE, DOUBLE, INTERLEAVE or MICROSTEP 
-   //-------------------------------------------------------------------------------------------------------------------------------------
-/*
-   // Change direction of stepper 1 if at the set limit
-   if (rightMotor.distanceToGo() == 0)
+} //writeLED()
+
+/*************************************************************************************************************************************
+ This function connects to the local Access Point and then starts up a a socket server to listen for client connections. This code is 
+ based on an exmaple we found at this URL: 
+ https://stackoverflow.com/questions/14143517/find-the-name-of-an-arduino-sketch-programmatically      
+ STATUS return codes: https://github.com/esp8266/Arduino/blob/master/libraries/ESP8266WiFi/src/include/wl_definitions.h    
+ typedef enum {
+    WL_NO_SHIELD        = 255 (for compatibility with WiFi Shield library)
+    WL_IDLE_STATUS      = 0,
+    WL_NO_SSID_AVAIL    = 1,
+    WL_SCAN_COMPLETED   = 2,
+    WL_CONNECTED        = 3,
+    WL_CONNECT_FAILED   = 4,
+    WL_CONNECTION_LOST  = 5,
+    WL_DISCONNECTED     = 6
+} wl_status_t;                         
+ *************************************************************************************************************************************/
+void startWiFi()
+{  
+
+   spl("[startWiFi] Scanning for and connecting to the strongest Access Point signal from a known list...");
+   WiFiMulti.addAP(ssid0, password);                                         // Add Wi-Fi AP we may be able to connect to
+   WiFiMulti.addAP(ssid1, password);                                         // Add Wi-Fi AP we may be able to connect to
+   WiFiMulti.addAP(ssid2, password);                                         // Add Wi-Fi AP we may be able to connect to
+   WiFiMulti.addAP(ssid3, password);                                         // Add Wi-Fi AP we may be able to connect to
+   while(WiFiMulti.run() != WL_CONNECTED)                                    // Wait for connection to the strongest signalling Wi-Fi AP 
+   {                                                               
+      sp(".");                                                               // Send dot to console terminal to show the waiting process 
+                                                                             // is active
+      delay(100);                                                            // Wait a little before trying again
+   } //while
+   spl("");                                             
+   sp("[startWiFi] Connected to Access Point ");                                        
+   spl(WiFi.SSID());                                                         // Name of AP to which the ESP8266 is connected to
+   sp("[startWiFi] IP address: ");                                   
+   spl(WiFi.localIP());                                                      // IP address assigned to ESP8266 by AP
+
+} //startWiFi()
+
+/*************************************************************************************************************************************
+ This function Start the mDNS service which handles mapping IP ports and provided services to connecting clients according to
+ https://media.readthedocs.org/pdf/arduino-esp8266/docs_to_readthedocs/arduino-esp8266.pdf, mDNS implements a simple DNS server that 
+ can be used in both STA and AP modes.  The DNS server currently supports only one domain (for all other domains it will reply with 
+ NXDOMAIN or custom status code).  With it, clients can open a web server running on ESP8266 using a domain name, not an IP address.
+ *************************************************************************************************************************************/
+void startDNS()
+{
+
+   if (mdns.begin("espWebSock", WiFi.localIP()))                             // Start mDNS service
    {
-  
-      rightMotor.moveTo(-rightMotor.currentPosition());
-   
+      sp("[startDNS] MDNS responder started. ");
+      sp("Adding HTTP service to port 80 ");
+      mdns.addService("http", "tcp", 80);                                    // If successfully started add web service on port 80
+      spl("and WS service to port 81");                    
+      mdns.addService("ws", "tcp", 81);                                      // If successfully started add websocket service on port 81
+      sp("[startDNS] Clients can connect to either ");
+      sp("http://espWebSock.local or http://"); 
+      spl(WiFi.localIP());                                                   // Send message to console advising URI for clients to use
+
    } //if
-   
-   // Change direction of stepper 2 if at the set limit
-   if (leftMotor.distanceToGo() == 0)
+   else                                                                      // If mDNS service fails to start
    {
-    
-   leftMotor.moveTo(-leftMotor.currentPosition());
-   
+      spl("[startDNS] MDNS.begin failed");                                   // Issue message
+   } //else
+  
+
+} //startDNS()
+
+/*************************************************************************************************************************************
+ This function starts the web service which sends HTML and Javascript client code to remote Web browser clients
+ *************************************************************************************************************************************/
+void startWebServer()
+{
+
+   server.on("/", handleRoot);                                               // Attach function for handling root page (/)
+   server.onNotFound(handleNotFound);                                        // Attach function for handling unknown page
+   server.begin();                                                           // Start web service
+   spl("[startWebServer] Started web server");                               
+
+} //startWebServer()
+
+/*************************************************************************************************************************************
+ This function starts the Web Socket service which manages bi-directional, asyncronous communication with any web socket clients
+ which connect.
+ *************************************************************************************************************************************/
+void startWebSocketServer()
+{
+
+   webSocket.begin();                                                        // Start websocket server
+   webSocket.onEvent(webSocketEvent);                                        // Attach function to websocket in order to handle events 
+   spl("[startWebSocketServer] Started web socket server");                  
+
+} //startWebSocketServer()
+
+/*************************************************************************************************************************************
+ This function processes text messages sent by connected clients
+ *************************************************************************************************************************************/
+void processClientText(uint8_t num, WStype_t type, uint8_t * payload, size_t length)
+{
+   if (strcmp(LEDON, (const char *)payload) == 0)                            // If text sent sets LEDON
+   {
+      writeLED(true);                                                        // Call function to turn GPIO LED off
    } //if
+   else if (strcmp(LEDOFF, (const char *)payload) == 0)                      // If text sent sets LEDOFF 
+   {
+      writeLED(false);                                                       // Call function to turn GPIO LED on
+   } //else if
+   else                                                                      // If the text sent is not any of the known commands
+   {
+      spl("[webSocketEvent] Unknown command");                               // Log unknown command in console
+   } //else
+   webSocket.broadcastTXT(payload, length);                                  // send payload data to all connected clients
+  
+} //processClientText()
 
-   rightMotor.run();
-   leftMotor.run();
-
-*/
-
-   //-------------------------------------------------------------------------------------------------------------------------------------
-   //Motor pulse calculations
-   //-------------------------------------------------------------------------------------------------------------------------------------
-   //To compensate for the non-linear behaviour of the stepper motors the folowing calculations are needed to get a linear speed behaviour.
-   if(pid_output_left > 0)pid_output_left = 405 - (1/(pid_output_left + 9)) * 5500;
-   else if(pid_output_left < 0)pid_output_left = -405 - (1/(pid_output_left - 9)) * 5500;
-
-   if(pid_output_right > 0)pid_output_right = 405 - (1/(pid_output_right + 9)) * 5500;
-   else if(pid_output_right < 0)pid_output_right = -405 - (1/(pid_output_right - 9)) * 5500;
-
-   //Calculate the needed pulse time for the left and right stepper motor controllers
-   if(pid_output_left > 0)left_motor = 400 - pid_output_left;
-   else if(pid_output_left < 0)left_motor = -400 - pid_output_left;
-   else left_motor = 0;
-
-   if(pid_output_right > 0)right_motor = 400 - pid_output_right;
-   else if(pid_output_right < 0)right_motor = -400 - pid_output_right;
-   else right_motor = 0;
-
-   //Copy the pulse time to the throttle variables so the interrupt subroutine can use them
-   throttle_left_motor = left_motor;
-   throttle_right_motor = right_motor;
-
-   //-------------------------------------------------------------------------------------------------------------------------------------
-   // Loop time timer. The angle calculations are tuned for a loop time of 20 milliseconds. To make sure every loop is exactly 20 
-   // milliseconds a wait loop is created by setting the loop_timer variable to LoopDelay (+20000 microseconds) every loop.
-   //-------------------------------------------------------------------------------------------------------------------------------------
-   while(loop_timer > micros());
-   loop_timer += LoopDelay;
-
-   //-------------------------------------------------------------------------------------------------------------------------------------
-   // Test print lines used to see what values are being carried in key variables or system functions
-   // Typically planned to only uncomment 1 at most at a time during analysis and troubleshooting
-   //-------------------------------------------------------------------------------------------------------------------------------------
-   //Serial.println(micros());   
-   Serial.println(angle_gyro); 
-   Serial.println(angle_acc);   
+/*************************************************************************************************************************************
+ This function scans the I2C bus for attached devices. This code was taken from http://playground.arduino.cc/Main/I2cScanner 
+ *************************************************************************************************************************************/
+void startI2Cbus()
+{
       
-} //loop()
-
-/////////////////////////////////////////////////////////////////////////////////////////////
-// Check if the MotorShield is at the expected address on the I2C bus and if so initialize 
-// it.
-/////////////////////////////////////////////////////////////////////////////////////////////
-void initializeMotorShield()
-{
-
-  byte error;
-
-  Serial.print("(initializeMotorShield): Checking to see if the MotorShield is found at expected I2C address of 0x");
-  Serial.println(MotorShield_I2C_Address,HEX);
-
-  Wire.beginTransmission(MotorShield_I2C_Address);
-  error = Wire.endTransmission();
-
-  if (error == 0)
-  {
-
-     Serial.print("(initializeMotorShield): I2C device found at address 0x");
-     Serial.println(MotorShield_I2C_Address,HEX);
-     Serial.println("(initializeMotorShield): MotorShield found at expected address");
-     Serial.print("(initializeMotorShield): Instantiating MotorShield object with a PWM of ");
-     Serial.println(MotorShieldPWMFrequency);
-     AFMS.begin(MotorShieldPWMFrequency);
-  
-     Serial.print("(initializeMotorShield): Default motor settings are ");
-     Serial.print("MAX SPEED: 100.0, ");
-     Serial.print("ACCELERATION: 100.0, ");
-     Serial.println("MOVE TO: 50, ");
+   byte error, address;
+   int nDevices;  
+   spl("[startI2Cbus] Initialize I2C bus");
+   Wire.begin(); 
+   spl("[startI2Cbus] Scanning I2C bus...");
+   nDevices = 0;
+   for(address = 1; address < 127; address++ )
+   {
+      // The i2c_scanner uses the return value of the Write.endTransmisstion to see if a device did acknowledge to the address
+      Wire.beginTransmission(address);
+      error = Wire.endTransmission();
      
-     rightMotor.setMaxSpeed(100.0);
-     rightMotor.setAcceleration(100.0);
-     rightMotor.moveTo(50);
-    
-     leftMotor.setMaxSpeed(100.0);
-     leftMotor.setAcceleration(100.0);
-     leftMotor.moveTo(50);
+      if (error == 0)
+      {
+         sp("[startI2Cbus] Device found at address 0x");
+         if (address<16) 
+         {
+            sp("0");
+         } //if
+         sp(address,HEX);sp(" - ");
+         nDevices++;
+         switch(address)                                                     // Check each located device to see what it is
+         {
+            case MPU_address:                                                // MPU6050
+               spl("[startI2Cbus] MPU6050");
+               break;
+            default:                                                         // Unknown websocket event
+               spl("[startI2Cbus] Unknown device");
+               break;
+         } //switch()          
+       } //if
+       else if (error==4)
+       {
+          sp("[startI2Cbus] Unknown error at address 0x");
+          if (address<16) 
+          {
+             sp("0");
+          } //if
+          spl(address,HEX);spl(" ");
+        } //else if    
+   } //for
+   if (nDevices == 0)
+   {
+      spl("[startI2Cbus] No I2C devices found");
+   } //if
+   else
+   {
+      spl("[startI2Cbus] I2C scan complete");
+   } //else
 
-  } //if
-  else
-  {
+} //startI2Cbus()
 
-     Serial.print("(initializeMotorShield): Motorshield query returned error code ");
-     Serial.println(error);
-     Serial.println("(initializeMotorShield): ERROR! Robot will not be able to move. Try powering everything off, have seen error code 4 cleared this way.");
-
-  } //else
-         
-} //initializeMotorShield()
-
-/////////////////////////////////////////////////////////////////////////////////////////////
-// Check if the IUM is at the expected address on the I2C bus. If it is then initialize
-// the IMU. Return codes for speaking to the IMU at endTransmission are as follows:
-//
-// 0:success
-// 1:data too long to fit in transmit buffer
-// 2:received NACK on transmit of address
-// 3:received NACK on transmit of data
-// 4:other error 
-/////////////////////////////////////////////////////////////////////////////////////////////
-void initializeIMU()
+/*************************************************************************************************************************************
+ This function checks to see if the IUM is at the expected address on the I2C bus. If it is then initialize the IMU. Return codes for 
+ speaking to the IMU at endTransmission are as follows:
+ 0:success
+ 1:data too long to fit in transmit buffer
+ 2:received NACK on transmit of address
+ 3:received NACK on transmit of data
+ 4:other error
+ *************************************************************************************************************************************/
+ void initializeIMU()
 {
 
   byte error, lowByte, highByte;
   int address;
   int receive_counter;
 
-  Serial.print("(initializeIMU): Checking to see if the IMU is found at expected I2C address of 0x");
-  Serial.println(gyro_address,HEX);
-  Wire.beginTransmission(gyro_address);
+  sp("(initializeIMU): Checking to see if the IMU is found at expected I2C address of 0x");
+  spl(MPU_address,HEX);
+  Wire.beginTransmission(MPU_address);
   error = Wire.endTransmission();
 
   if (error == 0)
   {
 
-     Serial.print("(initializeIMU): I2C device found at address 0x");
-     Serial.println(gyro_address,HEX);
-     Serial.println("(initializeIMU): The IMU MPU-6050 found at expected address");
+     sp("[initializeIMU] I2C device found at address 0x");
+     spl(MPU_address,HEX);
+     spl("[initializeIMU] The IMU MPU-6050 found at expected address");
      
-     Wire.beginTransmission(gyro_address);
+     Wire.beginTransmission(MPU_address);
      Wire.write(MPU6050_WHO_AM_I);
      Wire.endTransmission();
      
-     Serial.println("(initializeIMU): Send Who am I request to IMU...");
-     Wire.requestFrom(gyro_address, 1);
-     while(Wire.available() < 1); //Wait for respy from IMU slave on I2C bus                                     
+     spl("[initializeIMU] Send Who am I request to IMU...");
+     Wire.requestFrom(MPU_address, 1);
+     while(Wire.available() < 1);                                            //Wait for respy from IMU slave on I2C bus                                     
      lowByte = Wire.read();
 
-     if(lowByte == 0x68)
+     if(lowByte == MPU_address)
      {
      
-        Serial.print("(initializeIMU): Who Am I responce is ok: 0x");
-        Serial.println(lowByte, HEX);
+        sp("[initializeIMU] Who Am I responce is ok: 0x");
+        spl(lowByte, HEX);
         
-        Serial.println("(initializeIMU): Set up the Gyro registers in the IMU");
+        spl("[initializeIMU] Set up the Gyro registers in the IMU");
         set_gyro_registers();
-        Serial.println("(initializeIMU): Gyro started and configured");
+        spl("[initializeIMU] Gyro started and configured");
 
-        Serial.print("(initializeIMU): Balance value of Robot (only valid if robot is upright on a stand): ");
-        Wire.beginTransmission(gyro_address); //Start communication with the IMU
-        Wire.write(0x3F); // Get the MPU6050_ACCEL_ZOUT_H value
-        Wire.endTransmission(); //End the transmission with the gyro
-        Wire.requestFrom(gyro_address,2);
-        Serial.println((Wire.read()<<8|Wire.read())*-1);
-        delay(20);
+        spl("[initializeIMU] Wait 10 seconds to allow MPU to settle down");
+        delay(10000);
 
-        Serial.println("(initializeIMU): Set pitch and yaw offset values...");
-       
-        for(receive_counter = 0; receive_counter < 500; receive_counter++)  //Create 500 loops
+        read_mpu_6050_data();                                                     // Read MPU registers        
+        spl("[initializeIMU] If the robopt is on its back then this value is the BALANCE VALUE. TO DO - PUT CODE HERE TO GET BALANCE VALUE");
+        //AM: put balance value code here
+        
+        // Figure out a Gyro offset value for the MPU6050 for this robot. This accounts for errors in the mounting affecting the alu=ignment of the IMU
+        spl("[initializeIMU] Create Gyro pitch and yaw offset values by averaging 500 sensor readings...");
+        gyro_pitch_calibration_value = 0;                                         // initialize running total of samples
+
+        for(receive_counter = 0; receive_counter < 500; receive_counter++)        //Create 500 loops
         {
-          
-           if(receive_counter % 15 == 0)
+
+           if(receive_counter % 15 == 0) 
            {
-              digitalWrite(OnboardLEDPin, !digitalRead(OnboardLEDPin));     //Change the state of the LED every 15 loops 
-                                                                            //to make the LED blink fast
+              digitalWrite(LEDPIN, !digitalRead(LEDPIN));                      //Change the state of the LED every 15 loops to make the LED blink fast
            } //if
            
-           Wire.beginTransmission(gyro_address);                            //Start communication with the gyro
-           Wire.write(0x43);                                                //Start reading the Who_am_I register 75h
-           Wire.endTransmission();                                          //End the transmission
-           Wire.requestFrom(gyro_address, 4);                               //Request 2 bytes from the gyro
-           gyro_yaw_calibration_value += Wire.read()<<8|Wire.read();        //Combine the two bytes to make one integer
-           gyro_pitch_calibration_value += Wire.read()<<8|Wire.read();      //Combine the two bytes to make one integer
-           delay(0);                                                        //Slow down I2C commands to allow the Wifi stack to do its thing. 
-                                                                            //Lots of info on the internet plus my own experience with this 
-                                                                            //chip shows that this is needed to ensure stability.
-                                                                            
+           read_mpu_6050_data();                                                  // Read MPU registers  
+           // AM: Put logic here to add up the register values we care about      
+           delayMicroseconds(300);                                                //Wait for 300 (was 3700) microseconds to simulate the main program loop time
+
         } //for
-  
-        gyro_pitch_calibration_value /= 500;                                //Divide the total value by 500 to get the avarage gyro offset
-        gyro_yaw_calibration_value /= 500;                                  //Divide the total value by 500 to get the avarage gyro offset
-        Serial.print("(initializeIMU): Average PITCH gyro offset is ");
-        Serial.println(gyro_pitch_calibration_value);
-        Serial.print("(initializeIMU): Average YAW gyro offset is ");
-        Serial.println(gyro_yaw_calibration_value);
+   
+        // AM: Put code here to get average values for registers
+        //gyro_pitch_calibration_value /= 500;                                      //Divide the total value by 500 to get the avarage gyro pitch offset
+        //gyro_yaw_calibration_value /= 500;                                        //Divide the total value by 500 to get the avarage gyro yaw offset
+
+        //Serial.print("(initializeIMU): Average PITCH gyro offset is ");
+        //Serial.println(gyro_pitch_calibration_value/131);
+        //Serial.print("(initializeIMU): Average YAW gyro offset is ");
+        //Serial.println(gyro_yaw_calibration_value/131);
 
      } //if
      else
      {
      
-        Serial.print("(initializeIMU): Wrong Who Am I responce: 0x");
+        sp("[initializeIMU] Wrong Who Am I responce: 0x");
         if (lowByte<16)Serial.print("0");
-        Serial.println(lowByte, HEX);
-        Serial.println("(initializeIMU): Initialization of IMU failed");
+        spl(lowByte, HEX);
+        spl("[initializeIMU] Initialization of IMU failed");
      
      } //else
 
@@ -719,43 +621,116 @@ void initializeIMU()
   else
   {
 
-     Serial.print("(initializeIMU): MPU-6050 query returned error code ");
-     Serial.println(error);
-     Serial.println("(initializeIMU): ERROR! Robot will not be able to balance");
+     sp("[initializeIMU] MPU-6050 query returned error code ");
+     spl(error);
+     spl("[initializeIMU] ERROR! Robot will not be able to balance");
 
   } //else
-  
-        
+      
 } //initializeIMU()
 
-/////////////////////////////////////////////////////////////////////////////////////////////
-// Setup the MPU-6050 
-/////////////////////////////////////////////////////////////////////////////////////////////
+/*************************************************************************************************************************************
+ This function configures the MPU6050 using settings recommended by Joop Brokking
+ *************************************************************************************************************************************/
 void set_gyro_registers()
 {
 
-  Wire.beginTransmission(gyro_address);   //Start communication with the IMU
-  Wire.write(0x6B);                       //Write to the PWR_MGMT_1 register (6B hex)
-  Wire.write(0x00);                       //Set the register bits to 00000000 to activate the gyro
-  Wire.endTransmission();                 //End the transmission with the gyro
-  
-  Wire.beginTransmission(gyro_address);   //Start communication with the IMU
-  Wire.write(0x1B);                       //Write to the GYRO_CONFIG register (1B hex)
-  Wire.write(0x00);                       //Set register bits to 00000000 (250dps full scale)
-  Wire.endTransmission();                 //End the transmission with the gyro
+   spl("[set_gyro_registers] Configure the MPU6050...");
+   // By default the MPU-6050 sleeps. So we have to wake it up.
+   spl("[set_gyro_registers] Wake up MPU");
+   Wire.beginTransmission(MPU_address);                                      // Start communication with the address found during search.
+   Wire.write(0x6B);                                                         // We want to write to the PWR_MGMT_1 register (6B hex)
+   Wire.write(0x00);                                                         // Set the register bits as 00000000 to activate the gyro
+   Wire.endTransmission();                                                   // End the transmission with the gyro.
 
-  Wire.beginTransmission(gyro_address);   //Start communication with the IMU
-  Wire.write(0x1C);                       //Write to the ACCEL_CONFIG register (1C hex)
-  Wire.write(0x08);                       //Set the register bits as 00001000 (+/- 4g full scale range)
-  Wire.endTransmission();                 //End the transmission with the gyro
+   // Set the full scale of the gyro to +/- 250 degrees per second
+   spl("[set_gyro_registers] Set the full scale of the gyro to +/- 250 degrees per second");
+   Wire.beginTransmission(MPU_address);                                      // Start communication with the address found during search.
+   Wire.write(0x1B);                                                         // We want to write to the GYRO_CONFIG register (1B hex)
+   Wire.write(0x00);                                                         // Set the register bits as 00000000 (250dps full scale)
+   Wire.endTransmission();                                                   // End the transmission with the gyro
+        
+   // Set the full scale of the accelerometer to +/- 4g.
+   spl("[set_gyro_registers] Set the full scale of the accelerometer to +/- 4g");
+   Wire.beginTransmission(MPU_address);                                      // Start communication with the address found during search.
+   Wire.write(0x1C);                                                         // We want to write to the ACCEL_CONFIG register (1A hex)
+   Wire.write(0x08);                                                         // Set the register bits as 00001000 (+/- 4g full scale range)
+   Wire.endTransmission();                                                   // End the transmission with the gyro
 
-  Wire.beginTransmission(gyro_address);   //Start communication with the IMU
-  Wire.write(0x1A);                       //Write to the CONFIG register (1A hex)
-  Wire.write(0x03);                       //Set the register bits to 00000011 (Set Digital Low Pass Filter to ~43Hz)
-  Wire.endTransmission();                 //End the transmission with the gyro
+   // Set some filtering to improve the raw data.
+   spl("[set_gyro_registers] Set Set Digital Low Pass Filter to ~43Hz to improve the raw data");
+   Wire.beginTransmission(MPU_address);                                      // Start communication with the address found during search
+   Wire.write(0x1A);                                                         // We want to write to the CONFIG register (1A hex)
+   Wire.write(0x03);                                                         // Set the register bits as 00000011 (Set Digital Low Pass 
+                                                                             // Filter to ~43Hz)
+   Wire.endTransmission();                                                   // End the transmission with the gyro 
 
 } //set_gyro_registers
 
+/*************************************************************************************************************************************
+ This function reads the accelerometer and gyro info from the MPU6050
+ *************************************************************************************************************************************/
+void read_mpu_6050_data()                                              
+{
 
+  Wire.beginTransmission(MPU_address);                                       // Start communicating with the MPU-6050
+  Wire.write(0x3B);                                                          // Send the requested starting register
+  Wire.endTransmission();                                                    // End the transmission
+  Wire.requestFrom(MPU_address,14);                                          // Request 14 bytes from the MPU-6050
+  while(Wire.available() < 14);                                              // Wait until all the bytes are received
+  acc_x = Wire.read()<<8|Wire.read();                                        // Add the low and high byte to the acc_x variable
+  acc_y = Wire.read()<<8|Wire.read();                                        // Add the low and high byte to the acc_y variable
+  acc_z = Wire.read()<<8|Wire.read();                                        // Add the low and high byte to the acc_z variable
+  temperature = Wire.read()<<8|Wire.read();                                  // Add the low and high byte to the temperature variable
+  gyro_x = Wire.read()<<8|Wire.read();                                       // Add the low and high byte to the gyro_x variable
+  gyro_y = Wire.read()<<8|Wire.read();                                       // Add the low and high byte to the gyro_y variable
+  gyro_z = Wire.read()<<8|Wire.read();                                       // Add the low and high byte to the gyro_z variable
 
+} //read_mpu_6050_data()
+
+/*************************************************************************************************************************************
+ Initialization of all services, subsystems and program execution timing
+ *************************************************************************************************************************************/
+void setup()
+{
+
+   pinMode(LEDPIN, OUTPUT);                                                  // Take control on onbaord LED
+   writeLED(false);                                                          // Turn onboard LED off
+   Serial.begin(115200);                                                     // Console connection for terminal output
+   spl("\r\n[setup] SegbotSTEP sketch starts here");                         // Move to next line of serial trace incase there is noise in console
+   display_Running_Sketch();                                                 // Do a dump of a bunch of information to the terminal
+   Serial.setDebugOutput(true);                                              // http://esp8266.github.io/Arduino/versions/2.0.0/doc/reference.html
+   for(uint8_t t = 4; t > 0; t--)                                            // Allow time for ESP8266 serial to initialize 
+   {
+      spf("[setup] Boot wait %d...\r\n", t);                                 // Count down message to console
+      Serial.flush();                                                        // Wait for message to clear buffer
+      delay(1000);                                                           // Allow time to pass
+   } //for
+   startWiFi();                                                              // Connect to Access Point
+   startDNS();                                                               // Start service directory
+   startWebServer();                                                         // Start web service 
+   startWebSocketServer();                                                   // Start web socket service
+   startI2Cbus();                                                            // Scan the I2C bus for connected devices
+   initializeIMU();                                                          // Initialize MPU6050 IMU
+   spl("[setup] Initialization of the hardware complete");
+   sp("[setup] gyro_pitch_calibration_value= "); 
+   spl(gyro_pitch_calibration_value/65.5);
+   sp("[setup] gyro_yaw_calibration_value= "); 
+   spl(gyro_yaw_calibration_value/65.5);
+   loop_timer = micros() + LoopDelay;                                        // Set the loop_timer variable at the next end loop time
+
+} //setup
+
+/*************************************************************************************************************************************
+ Main program loop
+ *************************************************************************************************************************************/
+void loop()
+{
+
+   webSocket.loop();                                                         // Poll for websocket client events
+   server.handleClient();                                                    // Poll for web server client events
+   while(loop_timer > micros());                                             // Ensure that each loop takes the same amount of time                                           
+   loop_timer += LoopDelay;                                                  // Increment timer target for next iteration
+
+} //loop
 
