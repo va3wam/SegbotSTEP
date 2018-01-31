@@ -5,7 +5,7 @@
   (switched from Adafruit 9-DOF Absolute Orientation IMU BNO055 to the GY-521 MPU6050 3-Axis Acceleration Gyroscope 6DOF Module - 
   Blue) as well as switching from DC brushed motors to Steppers. 
   
-  Networking:
+  Networking
   The ESP8266 acts as a bi-directional, asyncronous socket server. The socket client will either be used for gathering telemetry 
   readings from the SegbotSTEP robot or to issue commands to the robot. The websocket and web code is based on the code found online 
   here: https://gist.github.com/bbx10/667e3d4f5f2c0831d00b. Links to help understand the ESP8266WiFi library can be found here:
@@ -17,7 +17,7 @@
   - Adafruit Feather HUZZAH development board based on ESP8266 @80MHz, 3.3V 4MB flash
   - DC Motor + Stepper Featherwing (https://www.adafruit.com/product/2927) 
   - GY-521 MPU6050 3-Axis Acceleration Gyroscope 6DOF Module - Blue 
-  (https://www.invensense.com/wp-content/uploads/2015/02/MPU-6000-Datasheet1.pdf) 
+  - Open Smart 1602 LCD Display
   
   Motor specs
   - Details found online at the RobotShop here: http://www.robotshop.com/ca/en/rbsoy03-soyo-unipolar-stepper-motor.html
@@ -48,6 +48,25 @@
     Motor 1: Black (Left), Yellow (center), Green (Right)
     Motor 2: Red (Left), White (center), Blue (Right)   
 
+  LCD specs 
+  Manufacturer: Open Smart
+  Model: 1602 LCD Display (blue silkscreen, yellow background, black letters)
+  Chip: PCF8574AT (I2C address 0x38)
+  Features:
+  - Resolution: 80 * 16
+  - Backlight color: Yellow Display
+  - Size: 2.6 inch
+  - Power: 4.5~5.5V (can run on 3.3VDC but text is very dim)
+  - Interface level: 5V (works fine with 3.3VDC)
+  Notes: If you can light up the backlight then you know that you have the correct I2C address and your wiring is correct. If you do 
+  not see any text on the screen then use a small phillips screwdriver to turn the POT on the back of the LCD unit until the text 
+  appears. Note that this LCD wants 5VDC but we are powering it with only 3.3VDC so the text is very dim, but it works. If you cannot 
+  light up the LCD back light and your wiring is correct then you may have the wrong I2C address. There are a number of addresses that 
+  are used and your best bet is to run the I2C scanner sketch to get the correct address.
+  Link: https://www.sunfounder.com/learn/Sensor-Kit-v2-0-for-Arduino/lesson-1-display-by-i2c-lcd1602-sensor-kit-v2-0-for-arduino.html
+  Email:support@sunfounder.com
+  Website:www.sunfounder.com
+
   IMU specs
   - Model: GY-521
   - Color: Blue
@@ -66,6 +85,7 @@
   - 2 x Pins
   - Dimensions: 0.83 in x 0.63 in x 0.12 in (2.1 cm x 1.6 cm x 0.3 cm)
   - Weight: 0.18 oz (5 g)
+  - Link: (https://www.invensense.com/wp-content/uploads/2015/02/MPU-6000-Datasheet1.pdf) 
 
   Software design
   - Arduino IDE 1.8.2
@@ -95,6 +115,7 @@
 #include <ESP8266WebServer.h>                                                // Turn ESP8266 into web server
 #include <ESP8266mDNS.h>                                                     // Allow ESP8266 to map services it offers to client 
 #include <Wire.h>                                                            // Needed for I2C communication
+#include <LiquidCrystal_I2C.h>                                               // https://github.com/marcoschwartz/LiquidCrystal_I2C
 
 /*************************************************************************************************************************************
  Define network objects and services
@@ -174,6 +195,20 @@ float pid_output_left, pid_output_right,pid_last_d_error;                    // 
 byte low_bat;                                                                // Flag when battery power level gets too low
 
 /*************************************************************************************************************************************
+ Define LCD related variables
+ *************************************************************************************************************************************/ 
+#define LCD_NO_MESSAGE ""                                                    // Blank message to scroll old messages off screen 
+#define SCROLL 2                                                             // Tell LCD to scroll full screen, both lines 
+#define LINE1 0                                                              // Tell LCD to diplay message on line 1
+#define LINE2 1                                                              // Tell LCD to diplay message on line 2
+const byte lcdAddr = 0x38;                                                   // LCD I2C address
+const byte lcdCols = 16;                                                     // LCD number of characters in a row
+const byte lcdRows = 2;                                                      // LCD number of lines
+const unsigned int scrollDelay = 500;                                        // Miliseconds before scrolling next char
+const unsigned int demoDelay = 2000;                                         // Miliseconds between demo loops
+LiquidCrystal_I2C lcd(lcdAddr,lcdCols,lcdRows);                              // Define LCD object
+
+/*************************************************************************************************************************************
  Define main loop workflow related variables
  *************************************************************************************************************************************/ 
 #define LoopDelay 100000                                                     // This is the target time in milliseconds that each
@@ -199,7 +234,7 @@ static const char PROGMEM INDEX_HTML[] = R"rawliteral(
 <html>
 <head>
 <meta name = "viewport" content = "width = device-width, initial-scale = 1.0, maximum-scale = 1.0, user-scalable=0">
-<title>SegbotSTEP Web Based Control Center</title>
+<title>SegbotSTEP Remote Home Page</title>
 <style>
 "body { background-color: #808080; font-family: Arial, Helvetica, Sans-Serif; Color: #000000; }"
 </style>
@@ -213,6 +248,8 @@ function start() {
   websock.onmessage = function(evt) {
     console.log(evt);
     var e = document.getElementById('ledstatus');
+    var m = document.getElementById('lblmsg');
+    m.innerHTML = evt.data;
     if (evt.data === 'ledon') {
       e.style.color = 'red';
     }
@@ -230,7 +267,8 @@ function buttonclick(e) {
 </script>
 </head>
 <body onload="javascript:start();">
-<h1>ESP8266 WebSocket Demo</h1>
+<h1>SegbotSTEP Web Based Control Center</h1>
+Last message from server: <label id="lblmsg">No message recieved yet</label><p>
 <div id="ledstatus"><b>LED</b></div>
 <button id="ledon"  type="button" onclick="buttonclick(this);">On</button> 
 <button id="ledoff" type="button" onclick="buttonclick(this);">Off</button>
@@ -689,6 +727,77 @@ void read_mpu_6050_data()
 } //read_mpu_6050_data()
 
 /*************************************************************************************************************************************
+ This function initializes the Open Smart 1602 LCD Display
+ *************************************************************************************************************************************/
+void initializeLCD()                                             
+{
+
+   lcd.clear();                                                              // Clear the LCD screen
+   lcd.init();                                                               // Initialize the LCD object 
+   lcd.backlight();                                                          // Turn on the LCD backlight
+   flashLCD();                                                               // Flash the LCD backlight
+  
+} //initializeLCD()                                                          
+
+/*************************************************************************************************************************************
+ This function sends messages you pass to it to the LCD and displays it centered.
+ *************************************************************************************************************************************/
+void sendLCD(String LCDmsg, byte LCDline)
+{
+
+   byte textLen = LCDmsg.length();                                           // Length of message to send
+   byte LCDcolumn = 0;                                                       // Starting column of message 
+   if(LCDline > 1) LCDline=1;                                                // Ensure line argument is not too large                                   
+   if(LCDline < 0) LCDline=0;                                                // Ensure line argument is not too small
+   LCDcolumn=(lcdCols-textLen)/2;                                            // Figure out starting point to center message         
+   lcd.setCursor(LCDcolumn,LCDline);                                         // Set cursor to correct location 
+   lcd.print(LCDmsg);                                                        // Send message to LCD 
+
+} //sendLCD()
+
+/*************************************************************************************************************************************
+ This function scrolls a message from left to right on the LCD. Note that both lines of the display scroll. You can send a blank
+ message to this function to scroll the current messages displayed on both lines off the LCD screen. Note that the second argument
+ passed to this function is not used if a null message if passed.
+*************************************************************************************************************************************/
+void scrollLCD(String LCDmsg, byte LCDline)
+{
+
+   byte textLen = LCDmsg.length();                                           // Length of message to send
+   byte LCDcolumn = 0;                                                       // Starting column of message 
+   if(LCDline > 1) LCDline=1;                                                // Ensure line argument is not too large                                   
+   if(LCDline < 0) LCDline=0;                                                // Ensure line argument is not too small
+   if(LCDmsg != LCD_NO_MESSAGE)                                              // If this is not a blank message display it
+   {
+      lcd.setCursor(LCDcolumn,LCDline);                                      // Set LCD cursor to correct location 
+      lcd.print(LCDmsg);                                                     // Send message to LCD
+   } //if 
+   for (byte positionCounter = 0; positionCounter < (textLen + lcdCols); positionCounter++) 
+   {
+      lcd.scrollDisplayRight();                                              // Scroll entire row to the right
+      delay(scrollDelay);                                                    // Pause between scrolls
+   } //for
+
+} //sendLCD()
+
+/*************************************************************************************************************************************
+ This function flashes the LCD backlight.
+*************************************************************************************************************************************/
+void flashLCD()   
+{
+   for (byte cnt = 0; cnt < 10; cnt++) 
+   {
+      lcd.backlight();                                                       // Turn on the LCD backlight
+      delay(100);
+      lcd.noBacklight();                                                     // Turn off backlight
+      delay(100);
+   } //for
+   lcd.backlight();                                                          // Turn on the LCD backlight
+   delay(100);
+
+} //flashLCDbacklight()
+
+/*************************************************************************************************************************************
  Initialization of all services, subsystems and program execution timing
  *************************************************************************************************************************************/
 void setup()
@@ -712,6 +821,9 @@ void setup()
    startWebSocketServer();                                                   // Start web socket service
    startI2Cbus();                                                            // Scan the I2C bus for connected devices
    initializeIMU();                                                          // Initialize MPU6050 IMU
+   initializeLCD();                                                          // Initialize the Open Smart 1602 LCD Display
+   sendLCD("SegbotSTEP",LINE1);                                              // Send message to LCD line 1
+   sendLCD("Mark I",LINE2);                                                  // Send message to LCD line 2
    spl("[setup] Initialization of the hardware complete");
    sp("[setup] gyro_pitch_calibration_value= "); 
    spl(gyro_pitch_calibration_value/65.5);
