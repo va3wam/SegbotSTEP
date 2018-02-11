@@ -103,9 +103,10 @@
   History
   Version MM-DD-YYYY Description
 */   
-  String my_ver="1.0";
+  String my_ver="1.1";
 /*
   ------- ---------- -----------------------------------------------------------------------------------------------------------------
+  1.1     02-11-2018 Updated I2C scan to halt boot if devices missing 
   1.0     01-30-2018 Code base created
  *************************************************************************************************************************************/
 #include <ESP8266WiFi.h>                                                     // Connect ESP8266 to AP
@@ -116,6 +117,7 @@
 #include <ESP8266mDNS.h>                                                     // Allow ESP8266 to map services it offers to client 
 #include <Wire.h>                                                            // Needed for I2C communication
 #include <LiquidCrystal_I2C.h>                                               // https://github.com/marcoschwartz/LiquidCrystal_I2C
+#include <ArduinoJson.h>                                                     // https://github.com/bblanchon/ArduinoJson
 
 /*************************************************************************************************************************************
  Define network objects and services
@@ -151,17 +153,14 @@ const char LEDON[] = "ledon";                                                // 
 const char LEDOFF[] = "ledoff";                                              // Turn onboard LED OFF
 
 /*************************************************************************************************************************************
- I2C device address definitions
- *************************************************************************************************************************************/
+ Define MPU6050 related variables
+ *************************************************************************************************************************************/ 
 #define MPU6050_WHO_AM_I 0x75                                                // Read only register on IMU with info about the device
 #define MPU_address 0x68                                                     // MPU-6050 I2C address. Note that AD0 pin on the
                                                                              // board cannot be left flaoting and must be connected
                                                                              // to the Arduino ground for address 0x68 or be connected
                                                                              // to VDC for address 0x69.
-
-/*************************************************************************************************************************************
- Define MPU6050 related variables
- *************************************************************************************************************************************/ 
+byte IMU_FOUND = false;                                                      // Flag to see if MPU found on I2C bus
 int acc_calibration_value = 1000;                                            // Set this variable to the accelerometer calibration 
                                                                              // value output at start-up of this script
 int gyro_pitch_data_raw;                                                     // Collect raw PITCH data from MPU
@@ -207,6 +206,12 @@ const byte lcdRows = 2;                                                      // 
 const unsigned int scrollDelay = 500;                                        // Miliseconds before scrolling next char
 const unsigned int demoDelay = 2000;                                         // Miliseconds between demo loops
 LiquidCrystal_I2C lcd(lcdAddr,lcdCols,lcdRows);                              // Define LCD object
+byte LCD_FOUND = false;                                                      // Flag to see if LCD found on I2C bus
+
+/*************************************************************************************************************************************
+ Define non-device specific I2C related variables. Device specific variables like addresses are found in device specific sections.
+ *************************************************************************************************************************************/ 
+byte I2C_UNKNOWN = false;                                                    // Flag if unknown device found on I2C bus
 
 /*************************************************************************************************************************************
  Define main loop workflow related variables
@@ -229,6 +234,68 @@ unsigned long loop_timer;                                                    // 
  http://arduino-esp8266.readthedocs.io/en/latest/PROGMEM.html. Details on how to write a Websocket Javascript client can be found
  here: https://www.tutorialspoint.com/websockets/websockets_send_receive_messages.htm
  *************************************************************************************************************************************/
+/*
+static const char PROGMEM INDEX_HTML[] = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+<meta name = "viewport" content = "width = device-width, initial-scale = 1.0, maximum-scale = 1.0, user-scalable=0">
+<title>SegbotSTEP Remote Home Page</title>
+<style>
+"body { background-color: #808080; font-family: Arial, Helvetica, Sans-Serif; Color: #000000; }"
+</style>
+<script>
+   var websock;
+   function start() {
+      websock = new WebSocket('ws://' + window.location.hostname + ':81/');
+      websock.onopen = function(evt) { console.log('websock open'); };
+      websock.onclose = function(evt) { console.log('websock close'); };
+      websock.onerror = function(evt) { console.log(evt); };
+      websock.onmessage = function(evt) {
+         console.log(evt);
+         var m = document.getElementById('lblmsg');
+         m.innerHTML = evt.data;      
+         var msg = JSON.parse(evt.data);
+         switch(msg.object) {
+            case "LED":
+               var e = document.getElementById('ledstatus');
+               if (msg.value === 'ledon') {
+                  e.style.color = 'red';
+               }
+               else if (msg.value === 'ledoff') {
+                  e.style.color = 'black';
+               }
+               else {
+                  console.log(msg.object);
+                  console.log(msg.property);
+                  console.log(msg.value);
+                  console.log('Unknown LED status value requested by server');
+               }         
+               break;
+         }    
+      };
+   }
+
+   function buttonclick(e) {
+      var msg = "{object : \"LED\", property: \"STATE\", value: " + e.id + "}";
+      websock.send(msg); 
+    };
+     
+}
+</script>
+</head>
+<body onload="javascript:start();">
+<h1>SegbotSTEP Web Based Control Center</h1>
+Last message from server: <label id="lblmsg">No message recieved yet</label><p>
+<div id="ledstatus"><b>LED</b></div>
+<button id="ledon"  type="button" onclick="buttonclick(this);">On</button> 
+<button id="ledoff" type="button" onclick="buttonclick(this);">Off</button>
+</body>
+</html>
+)rawliteral";
+
+*/
+
 static const char PROGMEM INDEX_HTML[] = R"rawliteral(
 <!DOCTYPE html>
 <html>
@@ -275,9 +342,9 @@ Last message from server: <label id="lblmsg">No message recieved yet</label><p>
 </body>
 </html>
 )rawliteral";
-
+ 
 /*************************************************************************************************************************************
- This function dumps a bunch of useful info to the terminal. This code is based on an exmaple we found at this URL:
+ This function dumps a bunch of useful info to the terminal. This code is based on an example we found at this URL:
  https://stackoverflow.com/questions/14143517/find-the-name-of-an-arduino-sketch-programmatically                                   
  *************************************************************************************************************************************/
 void display_Running_Sketch()
@@ -296,6 +363,7 @@ void display_Running_Sketch()
 void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length)
 {
 
+   String msg = "";
    spf("[webSocketEvent] Event detected: ");                                 // Show event details in terminal   
    spf("num = %d, type = %d (", num, type);                                  // Show event details in terminal
    sp(wsEvent[type-1]);spl(")");                                             // Show event details in terminal
@@ -317,7 +385,7 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
          {
             webSocket.sendTXT(num, LEDOFF, strlen(LEDOFF));                  // Send "ledoff" string to client 
          } //else
-       } //case
+      } //case
          break;                                                   
       case WStype_TEXT:                                                      // Client sent text event
          spf("[webSocketEvent] Client NUM: [%u], sent TEXT: %s\r\n", num, payload);
@@ -343,7 +411,7 @@ void handleRoot()
 {
 
    server.send_P(200, "text/html", INDEX_HTML);                              // Send the HTML page defined in INDEX_HTML
-   spl("[handleRoot] Sent HTML page to client");                              
+   spl("[handleRoot] Home page  requested via HTTP request on port 80. Sent EEPROM defined document page to client");                              
    
 } //handleRoot()
 
@@ -426,6 +494,8 @@ void startWiFi()
    spl(WiFi.SSID());                                                         // Name of AP to which the ESP8266 is connected to
    sp("[startWiFi] IP address: ");                                   
    spl(WiFi.localIP());                                                      // IP address assigned to ESP8266 by AP
+   sp("[startWiFi] MAC address: ");                                   
+   spl(WiFi.macAddress());                                                   // IP address of the ESP8266
 
 } //startWiFi()
 
@@ -455,7 +525,6 @@ void startDNS()
       spl("[startDNS] MDNS.begin failed");                                   // Issue message
    } //else
   
-
 } //startDNS()
 
 /*************************************************************************************************************************************
@@ -489,6 +558,7 @@ void startWebSocketServer()
  *************************************************************************************************************************************/
 void processClientText(uint8_t num, WStype_t type, uint8_t * payload, size_t length)
 {
+   sp("[processClientText] Process message from client [");sp(num);spl("]...");
    if (strcmp(LEDON, (const char *)payload) == 0)                            // If text sent sets LEDON
    {
       writeLED(true);                                                        // Call function to turn GPIO LED off
@@ -499,11 +569,66 @@ void processClientText(uint8_t num, WStype_t type, uint8_t * payload, size_t len
    } //else if
    else                                                                      // If the text sent is not any of the known commands
    {
-      spl("[webSocketEvent] Unknown command");                               // Log unknown command in console
+      spl("[processClientText] Unknown command");                            // Log unknown command in console
    } //else
    webSocket.broadcastTXT(payload, length);                                  // send payload data to all connected clients
+   spl("[processClientText] This is where JSON parsing happens");            
+   process_Client_JSON_msg();                                                // Process incoming client message (JSON format) 
   
 } //processClientText()
+
+/*************************************************************************************************************************************
+ Initialization of JSON object tree. This code is based on https://techtutorialsx.com/2016/07/30/esp8266-parsing-json/
+ Primer on JSON messaging format: http://www.json.org/
+ Message format we are going to use:
+ Property [variable/property name]
+ Action   [set,get]
+ Data     [value to assign (set) or value to read (get)]
+ How to handle data types: Most of the time, you can rely on the implicit casts. In other case, you can do root["time"].as<long>();
+ See also:
+ The website arduinojson.org contains the documentation for all the functions used above. It also includes an FAQ that will help you 
+ solve any deserialization problem. Please check it out at: https://arduinojson.org/. The book "Mastering ArduinoJson" contains a 
+ tutorial on deserialization. It begins with a simple example, like the one above, and then adds more features like deserializing 
+ directly from a file or an HTTP request. Please check it out at: https://arduinojson.org/book/
+ *************************************************************************************************************************************/
+void process_Client_JSON_msg()
+{
+
+   StaticJsonBuffer<200> jsonBuffer;                                         // Use arduinojson.org/assistant to compute the capacity
+   char json[] =
+      "{\"sensor\":\"gps\",\"time\":1351824120,\"data\":[48.756080,2.302038]}";
+   JsonObject& root = jsonBuffer.parseObject(json);                          // Root of the JSON object tree
+   if (!root.success())                                                      // Test if parsing succeeds 
+   {
+      spl("[initializeJSON] parseObject() failed");
+      return;
+   } //if
+   const char* sensor = root["sensor"];                                      // Property
+   long time = root["time"];                                                 // Action
+   double latitude = root["data"][0];                                        // Data
+   double longitude = root["data"][1];                                       // Data
+   sp("[initializeJSON] message from client: ");
+   sp(sensor);sp(",");sp(time);sp(",");sp(latitude, 6);
+   sp(",");spl(longitude, 6);  
+   
+} //process_Client_JSON_msg()
+
+/*************************************************************************************************************************************
+ Send JSON message to client
+ *************************************************************************************************************************************/
+//void sendDOMmessage(uint8_t num, String object, String property, String value)
+void sendJSONmsg(uint8_t num)
+{
+
+   String msg;
+//   msg += "{"; 
+//   msg += "object : " + object + " , ";
+//   msg += "property : " + property + " , ";
+//   msg += "value : " + value;
+//   msg += "}"; 
+//   webSocket.sendTXT(num, msg);
+     
+} //sendJSONmsg()
 
 /*************************************************************************************************************************************
  This function scans the I2C bus for attached devices. This code was taken from http://playground.arduino.cc/Main/I2cScanner 
@@ -535,13 +660,16 @@ void startI2Cbus()
          switch(address)                                                     // Check each located device to see what it is
          {
             case MPU_address:                                                // Invensense MPU-6050
-               spl("[startI2Cbus] Invensense MPU-6050 IMU on GY-521 or ITG-MPU board");
+               spl("Invensense MPU-6050 IMU on GY-521 or ITG-MPU board");
+               IMU_FOUND = true;                                             // Set flag indicating that MPU found on I2C bus
                break;
             case lcdAddr:                                                    // OpenSmart 1602 LCD Display 
-               spl("[startI2Cbus] OpenSmart 1602 LCD Display");
+               spl("OpenSmart 1602 LCD Display");
+               LCD_FOUND = true;                                             // Set flag indicating that LCD found on I2C bus
                break;
             default:                                                         // Unknown websocket event
-               spl("[startI2Cbus] Unknown device");
+               spl("Unknown device");
+               I2C_UNKNOWN = true;                                           // Indicate that an unknown I2C device has been found
                break;
          } //switch()          
        } //if
@@ -563,6 +691,24 @@ void startI2Cbus()
    {
       spl("[startI2Cbus] I2C scan complete");
    } //else
+
+   if(I2C_UNKNOWN)                                                           // Issue warning if I2C bus has unknown device 
+   {
+      spl("[startI2Cbus] WARNING - Unrecognized device detected on I2C bus. Boot sequence will continue."); 
+   } //if
+
+   if(!LCD_FOUND)                                                            // Issue error LCD not detected on I2C bus 
+   {
+      spl("[startI2Cbus] ERROR - LCD device not detected on I2C bus. Boot sequence halted."); 
+   } //if
+
+   if(!IMU_FOUND)                                                            // Issue error LCD not detected on I2C bus 
+   {
+      spl("[startI2Cbus] ERROR - IMU device not detected on I2C bus. Boot sequence halted."); 
+   } //if
+
+   while(!IMU_FOUND){};
+   while(!LCD_FOUND){};
 
 } //startI2Cbus()
 
@@ -617,10 +763,10 @@ void startI2Cbus()
         delay(10000);
 
         read_mpu_6050_data();                                                     // Read MPU registers        
-        spl("[initializeIMU] If the robopt is on its back then this value is the BALANCE VALUE. TO DO - PUT CODE HERE TO GET BALANCE VALUE");
+        spl("[initializeIMU] If the robot is on its back then this value is the BALANCE VALUE. TO DO - PUT CODE HERE TO GET BALANCE VALUE");
         //AM: put balance value code here
         
-        // Figure out a Gyro offset value for the MPU6050 for this robot. This accounts for errors in the mounting affecting the alu=ignment of the IMU
+        // Figure out a Gyro offset value for the MPU6050 for this robot. This accounts for errors in the mounting affecting the alignment of the IMU
         spl("[initializeIMU] Create Gyro pitch and yaw offset values by averaging 500 sensor readings...");
         gyro_pitch_calibration_value = 0;                                         // initialize running total of samples
 
@@ -781,7 +927,7 @@ void scrollLCD(String LCDmsg, byte LCDline)
       delay(scrollDelay);                                                    // Pause between scrolls
    } //for
 
-} //sendLCD()
+} //scrollLCD()
 
 /*************************************************************************************************************************************
  This function flashes the LCD backlight.
@@ -798,7 +944,20 @@ void flashLCD()
    lcd.backlight();                                                          // Turn on the LCD backlight
    delay(100);
 
-} //flashLCDbacklight()
+} //flashLCD()
+
+/*************************************************************************************************************************************
+ This function returns a String version of the local IP address
+ *************************************************************************************************************************************/
+String ipToString(IPAddress ip)
+{
+
+  String s="";
+  for (int i=0; i<4; i++)
+    s += i  ? "." + String(ip[i]) : String(ip[i]);
+  return s;
+
+} //ipToString()
 
 /*************************************************************************************************************************************
  Initialization of all services, subsystems and program execution timing
@@ -825,8 +984,10 @@ void setup()
    startI2Cbus();                                                            // Scan the I2C bus for connected devices
    initializeIMU();                                                          // Initialize MPU6050 IMU
    initializeLCD();                                                          // Initialize the Open Smart 1602 LCD Display
-   sendLCD("SegbotSTEP",LINE1);                                              // Send message to LCD line 1
-   sendLCD("Mark I",LINE2);                                                  // Send message to LCD line 2
+//   sendLCD("SegbotSTEP",LINE1);                                              // Send message to LCD line 1
+//   sendLCD("Mark I",LINE2);                                                  // Send message to LCD line 2
+   sendLCD(ipToString(WiFi.localIP()),LINE1);                                // Send message to LCD line 1
+   sendLCD(WiFi.macAddress(),LINE2);                                         // Send message to LCD line 2
    spl("[setup] Initialization of the hardware complete");
    sp("[setup] gyro_pitch_calibration_value= "); 
    spl(gyro_pitch_calibration_value/65.5);
