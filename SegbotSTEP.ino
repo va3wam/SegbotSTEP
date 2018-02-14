@@ -103,9 +103,11 @@
   History
   Version MM-DD-YYYY Description
 */   
-  String my_ver="1.2";
+  String my_ver="1.3";
 /*
   ------- ---------- -----------------------------------------------------------------------------------------------------------------
+  1.3     02-13-2018 Changed boot routine to update LCD as well as LED. Added LCD JSON message parsing and creation. Deleted old 
+          function ProcessClientText() as it is replaced with new JSON function. Fixed SendJSONmsg() function. 
   1.2     02-12-2018 Updated messaging format to use JSON parsing library. Added comments to client Javascript
   1.1     02-11-2018 Updated I2C scan to halt boot if devices missing 
   1.0     01-30-2018 Code base created
@@ -209,6 +211,8 @@ const unsigned int scrollDelay = 500;                                        // 
 const unsigned int demoDelay = 2000;                                         // Miliseconds between demo loops
 LiquidCrystal_I2C lcd(lcdAddr,lcdCols,lcdRows);                              // Define LCD object
 byte LCD_FOUND = false;                                                      // Flag to see if LCD found on I2C bus
+String LCDmsg0 = "SegbotSTEP";                                               // Track message displayed in line 1 of LCD
+String LCDmsg1 = "Mark 2";                                                   // Track message displayed in line 2 of LCD
 
 /*************************************************************************************************************************************
  Define non-device specific I2C related variables. Device specific variables like addresses are found in device specific sections.
@@ -262,61 +266,106 @@ R"rawliteral(
                websock.onopen = function(evt) { console.log('websock open'); };            // Log new connections
                websock.onclose = function(evt) { console.log('websock close'); };          // Log closed connection
                websock.onerror = function(evt) { console.log(evt); };                      // Log connection errors
+               
                ///////////////////////////////////////////////////////////////////////////////////////////////////////////
                // This function processes incoming server messages.
                ///////////////////////////////////////////////////////////////////////////////////////////////////////////
                websock.onmessage = function(evt)                                           
                {
                   console.log('[SegbotSTEP] evt = ' + evt.data);                           // Log incoming message
-                  var e = document.getElementById('ledstatus');                            // Create handle for LED status
-                  var m = document.getElementById('lblmsg');                               // Create handle for LED buttons
-                  m.innerHTML = evt.data;                                                  // Create handle for server message. DELETE
                   var msg = JSON.parse(evt.data);                                          // Parse incoming message (JSON)
                   console.log('[SegbotSTEP] msg.item = ' + msg.item);                      // Log JSON msg element 1
                   console.log('[SegbotSTEP] msg.action = ' + msg.action);                  // Log JSON msg element 2
-                  console.log('[SegbotSTEP] msg.value = ' + msg.value);                    // Log JSON msg element 3
-                  if (msg.value === 'ledon')                                               // If message sets LED on
+                  if (msg.item === 'LED')                                                  // If this message is about the LED
                   {
-                     e.style.color = 'red';                                                // Change LED text to RED
-                     console.log('[SegbotSTEP] set ledstatus color to red');               // Log action
-                  }
-                  else if (msg.value === 'ledoff')                                         // If message sets LED off
+                     var e = document.getElementById('ledstatus');                         // Create handle for LED status
+                     console.log('[SegbotSTEP] msg.value = ' + msg.value);                 // Log JSON msg element 3
+                     if (msg.value === 'ledon')                                            // If message sets LED on
+                     {
+                        e.style.color = 'red';                                             // Change LED text to RED
+                        console.log('[SegbotSTEP] set ledstatus color to red');            // Log action
+                     } //if
+                     else if (msg.value === 'ledoff')                                      // If message sets LED off
+                     {
+                        e.style.color = 'black';                                           // Change LED text to BLACK
+                        console.log('[SegbotSTEP] set ledstatus color to black');          // Log action
+                     } //else if
+                     else                                                                  // If you get here, command unknown
+                     {
+                        console.log('[SegbotSTEP] unknown LED value. evt.data = ' + evt.data);  // Log error item unknow
+                     } // else
+                  } //if
+                  else if (msg.item === 'LCD')                                             // If this message is about the LCD
                   {
-                     e.style.color = 'black';                                              // Change LED text to BLACK
-                     console.log('[SegbotSTEP] set ledstatus color to black');             // Log action
-                  }
-                  else                                                                     // If you get here, command unknown
+                     var e1 = document.getElementById('lcd1');                             // Create handle for LCD line 1 
+                     var e2 = document.getElementById('lcd2');                             // Create handle for LCD line 2 
+                     console.log('[SegbotSTEP] update LCD line 1 with ' + msg.line1);      // Log JSON msg line1 element
+                     console.log('[SegbotSTEP] update LCD line 2 with ' + msg.line2);      // Log JSON msg line1 element
+                     e1.value = msg.line1;                                                 // Place JSON line1 to text box 1   
+                     e2.value = msg.line2;                                                 // Place JSON line1 to text box 1   
+                  } //else if
+                  else
                   {
-                     console.log('[SegbotSTEP] unknown event. evt.data = ' + evt.data);    // Log error. Perhaps we should notify robot?
-                  }
-               };
-            }
-         
+                     console.log('[SegbotSTEP] unknown item (case sensative). evt.data = ' + evt.data);     // Log error item unknown                   
+                  } //else
+               }; //websock.onmessage() 
+            } //start()           
+ 
             //////////////////////////////////////////////////////////////////////////////////////////////////////////////
             // This function runs when either of the LED control buttons are pressed. These two buttons share the same
             // HTML DIV class ID (ledstatus), which allows us to combine the ID of each button (ledon and ledoff) with 
             // the DIV class ID they belong to to message the JSON server (robot) what we want to do with the onboard LED
             // of the Huzzah ESP8266    
             //////////////////////////////////////////////////////////////////////////////////////////////////////////////
-            function buttonclick(e) 
+            function ledControl(e) 
             {  
                var msg =                                                                   // Construct JSON string
                {
                   item:   "LED",                                                           // JSON msg element 1
                   action: "set",                                                           // JSON msg element 2
                   value:  e.id                                                             // JSON msg element 3
-               };
+               }; //var msg
                websock.send(JSON.stringify(msg));                                          // Send JSON message to server
                console.log('[SegbotSTEP] sent this to server: ' + JSON.stringify(msg));    // Log message sent
-            }
+            } //ledControl()
+
+            //////////////////////////////////////////////////////////////////////////////////////////////////////////////
+            // This function GETs or SETs the 2 lines of the LCD on the robot    
+            //////////////////////////////////////////////////////////////////////////////////////////////////////////////
+            function lcdControl(e) 
+            {  
+               if (e.id === 'getlcd')                                                      // If we want to get the LCD values
+               {
+                  var x = "get";                                                           // Element 2 (action) will be GET                
+               } //if
+               else                                                                        // If we want to set the LCD values
+               {
+                  var x = "set";                                                           // Element 2 (action) will be SET
+               } //else
+               var l1 = document.getElementById('lcd1');                                   // Create handle for LCD line 1 
+               var l2 = document.getElementById('lcd2');                                   // Create handle for LCD line 2 
+               var msg =                                                                   // Construct JSON GET string
+               {
+                  item:   "LCD",                                                           // JSON msg element 1
+                  action: x,                                                               // JSON msg element 2
+                  line1:  l1.value,                                                        // JSON msg element 3
+                  line2:  l2.value                                                         // JSON msg element 4                
+               }; //var msg
+               websock.send(JSON.stringify(msg));                                          // Send JSON message to server
+               console.log('[SegbotSTEP] sent this to server: ' + JSON.stringify(msg));    // Log message sent
+            } //lcdControl()
       </script>
    </head>
    <body onload="javascript:start();">
       <h1>SegbotSTEP Web Based Control Center</h1>
-      Last message from server: <label id="lblmsg">No message recieved yet</label><p>
       <div id="ledstatus"><b>LED</b></div>
-      <button id="ledon"  type="button" onclick="buttonclick(this);">On</button> 
-      <button id="ledoff" type="button" onclick="buttonclick(this);">Off</button>
+      <button id="ledon"  type="button" onclick="ledControl(this);">On</button> 
+      <button id="ledoff" type="button" onclick="ledControl(this);">Off</button>
+      <p><b>1650 LCD</b><br>
+      <input type="text" id="lcd1" style="background:GreenYellow; color:black;text-align:center;" maxlength="16"/><br>
+      <input type="text" id="lcd2" style="background:GreenYellow; color:black;text-align:center;" maxlength="16"/><br>
+      <button id="getlcd"  type="button" onclick="lcdControl(this);">Get</button> 
+      <button id="setlcd" type="button" onclick="lcdControl(this);">Set</button>
    </body>
 </html>
 )rawliteral";
@@ -343,7 +392,6 @@ void display_Running_Sketch()
 void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length)
 {
 
-   String msg = "";
    spf("[webSocketEvent] Event detected: ");                                 // Show event details in terminal   
    spf("num = %d, type = %d (", num, type);                                  // Show event details in terminal
    sp(wsEvent[type-1]);spl(")");                                             // Show event details in terminal
@@ -356,26 +404,8 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
       {
          IPAddress ip = webSocket.remoteIP(num);
          spf("[webSocketEvent] [%u] Connected from %d.%d.%d.%d url: %s\r\n", num, ip[0], ip[1], ip[2], ip[3], payload);
-         StaticJsonBuffer<200> jsonBuffer;                                   // Memory pool for JSON object tree
-                                                                             // Use arduinojson.org/assistant to compute the capacity
-         JsonObject& root = jsonBuffer.createObject();                       // Create the root of the object tree 
- // AM: Right now the start up logic simply sends the status of the onboard LED. Lets add the LCD to this as well. Later more stuff too.        
-         if (LEDStatus)                                                      // If client sent command to change the LED status 
-         {
-            root["item"] = "led";                                            // Element 1 of JSON message
-            root["action"] = "set";                                          // Element 2 of JSON message
-            root["value"] = "ledon";                                         // Element 3 of JSON message
-            root.printTo(msg);                                               // Convert JSON object tree to string
-            webSocket.sendTXT(num, msg);                                     // Send JSON message to server (robot)
-         } //if
-         else                                                                // If client wants to turn LED off
-         {
-            root["item"] = "led";                                            // Element 1 of JSON message
-            root["action"] = "set";                                          // Element 2 of JSON message
-            root["value"] = "ledoff";                                        // Element 3 of JSON message
-            root.printTo(msg);                                               // Convert JSON object tree to string
-            webSocket.sendTXT(num, msg);                                     // Send JSON message to server (robot)
-         } //else
+         sendClientLEDState(num);                                            // Send new client state of onboard LED
+         sendClientLCDState(num);                                            // Send new client text displayed on LCD
       } //case
          break;                                                   
       case WStype_TEXT:                                                      // Client sent text event
@@ -393,7 +423,7 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
    } //switch()
 
 } //webSocketEvent()
-
+         
 /*************************************************************************************************************************************
  This function handles the web server service for valid HTTP GET and POST requests for the root (home) page. The rely simply sends 
  the web page defined in the EEPROM (non-volitile memory of the ESP8266 chip), pointed to by INDEX_HTML[] 
@@ -548,68 +578,168 @@ void startWebSocketServer()
  This function processes incoming client messages. Messages are in JSON format. This code is based on
  https://techtutorialsx.com/2016/07/30/esp8266-parsing-json/
  Primer on JSON messaging format: http://www.json.org/
- Message format we are going to use:
+ About the JSON message format used. All messages have the first value:
     item     [variable/property name] - e.g. LED or LCD
+ After this the JSON message format changes depending upon the value of ITEM. Each use case is detailed below:   
+
+ 1. ITEM = LED. Message format is as follows:
     action   [set,get]
-    value    [value to assign (set) or value to read (get)]
- How to handle data types: Most of the time, you can rely on the implicit casts. In other case, you can do root["time"].as<long>();
+    value    [ledon,ledoff]
+
+ 2. ITEM = LCD. Message format is as follows:
+    action   [set,get]
+    line1    [message]
+    line2    [message]
+ 
+ Handy additional notes. How to handle data types: 
+    Most of the time, you can rely on the implicit casts. In other case, you can do root["time"].as<long>();
  See also:
- The website arduinojson.org contains the documentation for all the functions used. It also includes an FAQ that will help you 
- solve any deserialization problem. Please check it out at: https://arduinojson.org/. The book "Mastering ArduinoJson" contains a 
- tutorial on deserialization. It begins with a simple example, like the one above, and then adds more features like deserializing 
- directly from a file or an HTTP request. Please check it out at: https://arduinojson.org/book/
+    The website arduinojson.org contains the documentation for all the functions used. It also includes an FAQ that will help you 
+    solve any deserialization problem. Please check it out at: https://arduinojson.org/. The book "Mastering ArduinoJson" contains a 
+    tutorial on deserialization. It begins with a simple example, like the one above, and then adds more features like deserializing 
+    directly from a file or an HTTP request. Please check it out at: https://arduinojson.org/book/
  *************************************************************************************************************************************/
 void process_Client_JSON_msg(uint8_t num, WStype_t type, uint8_t * payload, size_t length)
 {
 
    String payload_str = String((char*) payload);
    StaticJsonBuffer<500> jsonBuffer;                                         // Use arduinojson.org/assistant to compute the capacity
-   JsonObject& root = jsonBuffer.parseObject(payload_str);                   // Root of the JSON object tree
+   JsonObject& root = jsonBuffer.parseObject(payload_str);                   // Create JSON object tree with reference handle "root"
    if (!root.success())                                                      // Test if parsing succeeds 
    {
-      sp("[process_Client_JSON_msg] WARNING, parseObject() failed on message from client [");sp(num);spl("]");
+      sp("[process_Client_JSON_msg] WARNING, parseObject() failed on message from client [");
+      sp(num);spl("]. Message ignored");
       return;
    } //if
-   String item = root["item"];                                               // Property
-   String action = root["action"];                                           // Action
-   String value = root["value"];                                             // Value
-   sp("[process_Client_JSON_msg] message from client: ");
-   sp(item);sp(",");sp(action);sp(",");spl(value);
-
-   if (root["value"] == LEDON)                                               // If text sent sets LEDON
+   String item = root["item"];                                               // This is the item that the client is interested in
+   sp("[process_Client_JSON_msg] message from client regarding item: ");sp(item);
+   if(item == "LED")                                                         // Check if client is interested in the LED
    {
-      sp("[process_Client_JSON_msg] client requested LED on: ");
-      writeLED(true);                                                        // Call function to turn GPIO LED off
-      webSocket.broadcastTXT(payload_str);                                   // send payload data to all connected clients
+      spf("[process_Client_JSON_msg] Client NUM [%u] messaging about LED\r\n", num);
+      String action = root["action"];                                        // This is what the client wants to do with the LED
+      String value = root["value"];                                          // This is the value detail for the LED
+      if (root["action"] == "set")                                           // If client wants to SET LED value
+      {
+         if (root["value"] == LEDON)                                         // If client wants LEDON
+         {
+            sp("[process_Client_JSON_msg] Client requested LED on: ");
+            writeLED(true);                                                  // Call function to turn GPIO LED off
+            sendClientLEDState(99);                                          // Request broadcast (99) of the current value of the LED
+         } //if
+         else if(root["value"] == LEDOFF)                                    // If client wants LEDOFF 
+         {
+            sp("[process_Client_JSON_msg] Client requested LED off: ");
+            writeLED(false);                                                 // Call function to turn GPIO LED on
+            sendClientLEDState(99);                                          // Request broadcast (99) of the current value of the LED
+         } //else if
+         else                                                                // If client wants any other value it is invalid
+         {
+            sp("[process_Client_JSON_msg] Client [");sp(num);sp("] has sent unrecognized VALUE [");sp(value);spl("] for LED. Message ignored");
+         } //else       
+      } //if ACTION
+      else if (root["action"] == "get")                                      // If client wants to GET LED value
+      {
+         spf("[process_Client_JSON_msg] Client [%u] requesting current LED value\r\n", num);
+         sendClientLEDState(num);                                            // Send client the current value of the LED
+      } //else if ACTION
+      else                                                                   // Any other action the client wants for LED is invalid
+      {
+         sp("[process_Client_JSON_msg] Client [");sp(num);sp("] has sent unrecognized ACTION [");sp(action);spl("]. Message ignored");
+      } //else ACTION
    } //if
-   else if(root["value"] == LEDOFF)                                          // If text sent sets LEDOFF 
+   else if(item == "LCD")                                                    // Check if client is interested in the LCD
    {
-      sp("[process_Client_JSON_msg] client requested LED off: ");
-      writeLED(false);                                                       // Call function to turn GPIO LED on
-      webSocket.broadcastTXT(payload_str);                                   // send payload data to all connected clients
-   } //else if
-   else                                                                      // If the text sent is not any of the known commands
+      spf("[process_Client_JSON_msg] Client NUM [%u] messaging about LCD\r\n", num);
+      String action = root["action"];                                        // This is what the client wants to do with the LCD
+      String line1 = root["line1"];                                          // Message text for top line of LCD
+      String line2 = root["line2"];                                          // Message text for bottom line of LCD
+      if (root["action"] == "set")                                           // If client wants to SET LCD value
+      {
+         spf("[process_Client_JSON_msg] Client [%u] wants to set LCD message\r\n", num);         
+         lcd.clear();                                                        // Clear the LCD screen
+         sendLCD(line1, 0);                                                  // Update line 1 of LCD with client message
+         sendLCD(line2, 1);                                                  // Update line 2 of LCD with client message
+         sendClientLCDState(99);                                             // Send client the current value of the LED        
+      } // if
+      else if(root["action"] == "get")                                       // If client wants to GET LCD value
+      {
+         spf("[process_Client_JSON_msg] Client [%u] requesting current LCD message\r\n", num);
+         sendClientLCDState(num);                                            // Send client the current value of the LED        
+      } //else if
+      else
+      {
+         sp("[process_Client_JSON_msg] Client [");sp(num);sp("] has sent unrecognized ACTION [");sp(action);spl("]. Message ignored");        
+      } //else
+   } //else if ITEM LCD
+   else                                                                      // Unknown item being referenced by client
    {
-      sp("[process_Client_JSON_msg] client has sent unrecognized message");
-   } //else
-  
+      sp("[process_Client_JSON_msg] Client NUM [");sp(num);sp("] messaging about unknown ITEM [");sp(item);spl("]. Message ignored");
+   } //else ITEM UNKNOWN
+
 } //process_Client_JSON_msg()
 
 /*************************************************************************************************************************************
- Send JSON message to client
+ This function sends the current state of the onboard LED a specific client (or all clients if argumwnt is 99). Message format:
+    
  *************************************************************************************************************************************/
-void sendJSONmsg(uint8_t num)
+void sendClientLEDState(uint8_t num)
 {
 
-   String msg;
-//   msg += "{"; 
-//   msg += "object : " + object + " , ";
-//   msg += "property : " + property + " , ";
-//   msg += "value : " + value;
-//   msg += "}"; 
-//   webSocket.sendTXT(num, msg);
-     
-} //sendJSONmsg()
+   String msg = "";                                                          // String to hold JSON message to be transmitted
+   StaticJsonBuffer<200> jsonBuffer;                                         // Memory pool for JSON object tree
+                                                                             // Use arduinojson.org/assistant to compute the capacity
+   JsonObject& root = jsonBuffer.createObject();                             // Create the root of the object tree 
+   root["item"] = "LED";                                                     // Element 1 of JSON message
+   root["action"] = "set";                                                   // Element 2 of JSON message
+   if (LEDStatus)                                                            // Check flag that tracks current state of the onboard LED  
+   {
+      root["value"] = "ledon";                                               // Element 3 of JSON message
+   } //if
+   else                                                                      // If client wants to turn LED off
+   {
+      root["value"] = "ledoff";                                              // Element 3 of JSON message
+   } //else
+   root.printTo(msg);                                                        // Convert JSON object tree to string
+   if(num==99)                                                               // If client num is 99 we want to multicast 
+   {
+      sp("[sendClientLEDState] broadcast this to all clients: ");spl(msg);
+      webSocket.broadcastTXT(msg);                                           // Send payload data to all connected clients
+   } //if
+   else                                                                      // Otherwise we unicast to a specific client
+   {
+      sp("[sendClientLEDState] unicast this to [");sp(num);sp("]: ");spl(msg);
+      webSocket.sendTXT(num, msg);                                           // Send JSON message to server (robot)
+   } //else
+
+} //sendClientLEDState()
+
+/*************************************************************************************************************************************
+ This function sends the current state of the LCD to a specific client (or all clients if argumwnt is 99)
+ *************************************************************************************************************************************/
+void sendClientLCDState(uint8_t num)
+{
+
+   String msg = "";                                                          // String to hold JSON message to be transmitted
+   StaticJsonBuffer<200> jsonBuffer;                                         // Memory pool for JSON object tree
+                                                                             // Use arduinojson.org/assistant to compute the capacity
+   JsonObject& root = jsonBuffer.createObject();                             // Create the root of the object tree 
+   root["item"] = "LCD";                                                     // Element 1 of JSON message
+   root["action"] = "set";                                                   // Element 2 of JSON message
+   root["line1"] = LCDmsg0;                                                  // Element 3 of JSON message
+   root["line2"] = LCDmsg1;                                                  // Element 4 of JSON message    
+   root.printTo(msg);                                                        // Convert JSON object tree to string
+   if(num==99)                                                               // If client num is 99 we want to multicast 
+   {
+      sp("[sendClientLCDState] broadcast this to all clients: ");spl(msg);
+      webSocket.broadcastTXT(msg);                                           // Send payload data to all connected clients
+   } //if
+   else                                                                      // Otherwise we unicast to a specific client
+   {
+      sp("[sendClientLCDState] unicast this to [");sp(num);sp("]: ");spl(msg);
+      webSocket.sendTXT(num, msg);                                           // Send JSON message to server (robot)
+   } //else
+
+} //sendClientLCDState()
 
 /*************************************************************************************************************************************
  This function scans the I2C bus for attached devices. This code was taken from http://playground.arduino.cc/Main/I2cScanner 
@@ -882,7 +1012,15 @@ void sendLCD(String LCDmsg, byte LCDline)
    LCDcolumn=(lcdCols-textLen)/2;                                            // Figure out starting point to center message         
    lcd.setCursor(LCDcolumn,LCDline);                                         // Set cursor to correct location 
    lcd.print(LCDmsg);                                                        // Send message to LCD 
-
+   if(LCDline == 0)                                                          // If this is the first line of the LCD
+   {
+      LCDmsg0 = LCDmsg;                                                      // Track current message in line 1 global variable
+   } //if
+   else                                                                      // If this is the second line of the LCD
+   {
+      LCDmsg1 = LCDmsg;                                                      // Track current message in line 2 global variable    
+   } //else
+   
 } //sendLCD()
 
 /*************************************************************************************************************************************
