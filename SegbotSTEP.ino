@@ -127,6 +127,7 @@
 /*************************************************************************************************************************************
  Define PID and motor control variables and constants
  *************************************************************************************************************************************/
+long pcnt;                                                                   // This is used for some ping test timing
 const int acc_calibration_value = -1125;                                     // 15 Enter the accelerometer calibration value. was -1200
                                                                              // andrew's constant = +535, doug's constant = -1356, no, -1125
 const volatile int speed = -1;                                               // for initial testing of interrupt driven steppers
@@ -366,7 +367,7 @@ R"rawliteral(
                   console.log('[SegbotSTEP] evt = ' + evt.data);                           // Log incoming message
                   var msg = JSON.parse(evt.data);                                          // Parse incoming message (JSON)
                   console.log('[SegbotSTEP] msg.item = ' + msg.item);                      // Log JSON msg element 1
-                  console.log('[SegbotSTEP] msg.action = ' + msg.action);                  // Log JSON msg element 2
+//                  console.log('[SegbotSTEP] msg.action = ' + msg.action);                  // Log JSON msg element 2
                   if (msg.item === 'LED')                                                  // If this message is about the LED
                   {
                      var e = document.getElementById('ledstatus');                         // Create handle for LED status
@@ -395,7 +396,11 @@ R"rawliteral(
                      e1.value = msg.line1;                                                 // Place JSON line1 to text box 1   
                      e2.value = msg.line2;                                                 // Place JSON line1 to text box 1   
                   } //else if
-                  else
+                  else if (msg.item === 'ping')                                            // Turn around timing test message 
+                  {
+                     websock.send(evt.data);                                               // Send message from server back
+                  } //else if                  
+                  else                                                                     // No idea what this ITEM type is
                   {
                      console.log('[SegbotSTEP] unknown item (case sensative). evt.data = ' + evt.data);     // Log error item unknown                   
                   } //else
@@ -526,9 +531,9 @@ void display_Running_Sketch()
 void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length)
 {
 
-   spf("[webSocketEvent] Event detected: ");                                 // Show event details in terminal   
-   spf("num = %d, type = %d (", num, type);                                  // Show event details in terminal
-   sp(wsEvent[type-1]);spl(")");                                             // Show event details in terminal
+//   spf("[webSocketEvent] Event detected: ");                                 // Show event details in terminal   
+//   spf("num = %d, type = %d (", num, type);                                  // Show event details in terminal
+//   sp(wsEvent[type-1]);spl(")");                                             // Show event details in terminal
    switch(type)                                                              // Handle each event by type
    {
       case WStype_DISCONNECTED:                                              // Client disconnect event
@@ -540,10 +545,11 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
          spf("[webSocketEvent] [%u] Connected from %d.%d.%d.%d url: %s\r\n", num, ip[0], ip[1], ip[2], ip[3], payload);
          sendClientLEDState(num);                                            // Send new client state of onboard LED
          sendClientLCDState(num);                                            // Send new client text displayed on LCD
+         sendClientPing(num);                                                // Send new client a ping message (test only)
       } //case
          break;                                                   
       case WStype_TEXT:                                                      // Client sent text event
-         spf("[webSocketEvent] Client NUM: [%u], sent TEXT: %s\r\n", num, payload);
+//         spf("[webSocketEvent] Client NUM: [%u], sent TEXT: %s\r\n", num, payload);
          process_Client_JSON_msg(num, type, payload, length);                // Process recieved message using JSON library
          break;
       case WStype_BIN:                                                       // Client sent binary data event
@@ -724,7 +730,10 @@ void startWebSocketServer()
     action   [set,get]
     line1    [message]
     line2    [message]
- 
+
+ 3. ITEM = ping. Message format is as follows:
+    line     [32 bytes of data]
+    
  Handy additional notes. How to handle data types: 
     Most of the time, you can rely on the implicit casts. In other case, you can do root["time"].as<long>();
  See also:
@@ -746,7 +755,7 @@ void process_Client_JSON_msg(uint8_t num, WStype_t type, uint8_t * payload, size
       return;
    } //if
    String item = root["item"];                                               // This is the item that the client is interested in
-   sp("[process_Client_JSON_msg] message from client regarding item: ");sp(item);
+//   sp("[process_Client_JSON_msg] message from client regarding item: ");sp(item);
    if(item == "LED")                                                         // Check if client is interested in the LED
    {
       spf("[process_Client_JSON_msg] Client NUM [%u] messaging about LED\r\n", num);
@@ -805,6 +814,10 @@ void process_Client_JSON_msg(uint8_t num, WStype_t type, uint8_t * payload, size
          sp("[process_Client_JSON_msg] Client [");sp(num);sp("] has sent unrecognized ACTION [");sp(action);spl("]. Message ignored");        
       } //else
    } //else if ITEM LCD
+   else if(item == "ping")                                                   // Check if client is sending ping test message
+   {
+      sendClientPing(num);                                                   // Send client the current value of the LED        
+   } //else if
    else                                                                      // Unknown item being referenced by client
    {
       sp("[process_Client_JSON_msg] Client NUM [");sp(num);sp("] messaging about unknown ITEM [");sp(item);spl("]. Message ignored");
@@ -813,8 +826,28 @@ void process_Client_JSON_msg(uint8_t num, WStype_t type, uint8_t * payload, size
 } //process_Client_JSON_msg()
 
 /*************************************************************************************************************************************
- This function sends the current state of the onboard LED a specific client (or all clients if argumwnt is 99). Message format:
-    
+ This function is used to test roung trip timing of messages to the client.    
+ *************************************************************************************************************************************/
+void sendClientPing(uint8_t num)
+{
+   pcnt++;
+   String msg = "";                                                          // String to hold JSON message to be transmitted
+   StaticJsonBuffer<200> jsonBuffer;                                         // Memory pool for JSON object tree
+                                                                             // Use arduinojson.org/assistant to compute the capacity
+   JsonObject& root = jsonBuffer.createObject();                             // Create the root of the object tree 
+   root["item"] = "ping";                                                    // Element 1 of JSON message
+   root["line"] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";                        // Element 2 of JSON message
+   root.printTo(msg);                                                        // Convert JSON object tree to string
+   if(pcnt%1000==0) 
+   {
+       sp("[sendClientPing] time after 1000 pings = ");spl(millis());
+   } //if
+   webSocket.sendTXT(num, msg);                                           // Send JSON message to server (robot)
+
+} //sendClientPing()
+
+/*************************************************************************************************************************************
+ This function sends the current state of the onboard LED a specific client (or all clients if argumwnt is 99).    
  *************************************************************************************************************************************/
 void sendClientLEDState(uint8_t num)
 {
@@ -1526,10 +1559,12 @@ void loop()
    if (i++ > 250)                                                            // if a full second has passed, display debug info
    {
       i = 0;                                                                 // prepare to count up to next second
+/*
       spd("--pid_error_temp= ",pid_error_temp); spd("  angle_gyro= ",angle_gyro); spd("  self_balance_pid_setpoint= ",self_balance_pid_setpoint); 
       spdl("  pid_setpoint= ",pid_setpoint);
       spd("  pid_output= ",pid_output);spdl("  pid_output_left= ",hold);
       spd("  pid_i_mem= ",hold2);spdl("  initial pid_output= ",hold3);
+*/
 //      spd("  throttle_left_motor= ",throttle_left_motor); spd("  left_motor= ",left_motor);         
 
       loop_mics = micros() - mics;                                             // 11  calculate main loop time, in microseconds
